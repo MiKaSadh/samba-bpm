@@ -363,13 +363,13 @@ details[open] summary::after{content:"－"}
           <button type="button" data-w="flat">均等</button>
           <button type="button" data-w="caixa">高域重視</button>
         </div>
-        <span class="hint">既定のスルド重視は低音（スルド）を拍の手がかりにします。スルドが遠い・人数が少ない時は均等、カイシャやシャカシャカ主体なら高域重視。</span>
+        <span class="hint">既定は均等（全帯域を同じ重みで見る）。スルドが遠い・埋もれている時はスルド重視、スルドが少なくカイシャやシャカシャカ主体の曲なら高域重視にすると安定することがあります。</span>
       </div>
     </div>
 
     <div class="row">
       <span class="k">感度</span>
-      <div class="c"><input type="range" id="sens" min="100" max="3000" step="50"><span class="hint" id="sensLab"></span></div>
+      <div class="c"><input type="range" id="sens" min="0" max="100" step="1"><span class="hint" id="sensLab"></span><span class="hint">小さすぎる音を解析から外すしきい値です。表示が暴れる時は下げ、拾わない時は上げてください。</span></div>
     </div>
 
     <div class="row">
@@ -427,7 +427,8 @@ details[open] summary::after{content:"－"}
         <li><b>範囲を決める</b>：曲の見当がつくなら「サンバヘギ」か「バツカーダ」に。範囲が狭いほど表示が落ち着きます。</li>
         <li><b>走りの確認</b>：頭の本番テンポを目標BPMに入れて走り出す。推移グラフが右肩上がりなら全体が走っています。</li>
         <li><b>倍・半分が出たら</b>：÷2 または ×2 を押すと範囲ごと切り替わります。</li>
-        <li><b>表示が暴れる</b>：応答を「安定」に、重視する音を「スルド重視」に。それでも駄目なら感度を下げてカイシャの刻みを拾いすぎないように。</li>
+        <li><b>表示が暴れる</b>：まず応答を「安定」に。それでも駄目なら重視する音を「スルド重視」に変えるか、感度を下げて暗騒音を解析から外してください。</li>
+        <li><b>マイクが拾えているか</b>：上の3本のバー（低・中・高）が演奏に合わせて振れていれば届いています。低が振れないならスルドに近づけるか感度を上げてください。</li>
         <li><b>iPhone</b>：Safariで開き、マイクの許可を「許可」に。消音スイッチがオンでもマイク入力は動きますが、クリック音は鳴りません。</li>
       </ul>
     </div>
@@ -447,35 +448,52 @@ details[open] summary::after{content:"－"}
 "use strict";
 /* ============================================================
    Bateria BPM — マイク入力からのリアルタイムテンポ検出
-   帯域分割（スルド／中域／カイシャ）→ オンセット強度関数 →
-   自己相関＋倍音和＋連続性 → テンポ、位相はPLLで追従。
+   Stark / Davies / Plumbley の実時間ビートトラッカー(BTrack)と同じ構成:
+
+     複素スペクトル差分(位相の線形外挿からのずれ)によるオンセット検出関数
+       → 局所平均を引いて半波整流(適応的しきい値)
+       → 自己相関 → 櫛形フィルタバンク + レイリー重み で拍周期
+       → 累積スコア法(対数ガウス遷移窓)で次の拍位置を予測
+
+   振幅の増加だけを見る方式と違い、位相の不連続でも打点を捉えるので、
+   鳴り続けるスルドの上に重なる打点のタイミングが取れる。
    ============================================================ */
 
-const HOP = 128;          // AudioWorklet の 1 quantum
-const POST = 8;           // 8 quantum ごとにメインスレッドへ送る（約21ms）
-const RING = 4096;        // 包絡線リングバッファ長（約10.9秒 @48kHz）
-const W_PRESETS = {surdo:[1.0,0.45,0.30], flat:[0.70,0.70,0.70], caixa:[0.40,0.50,1.0]};
+const FRAME = 1024;       // FFT窓長（@48kHz で 21.3ms）
+const HOP   = 256;        // ホップ（@48kHz で 5.3ms = ODF 187.5Hz）
+const QUANTUM = 128;      // AudioWorklet の 1 quantum
+const POST  = 4;          // 4フレームまとめてメインスレッドへ送る
+const RING  = 4096;       // ODFリングバッファ（187.5Hzで約21.8秒）
+const NBINS = FRAME >> 1;
+/* 帯域の重み。スルド(〜150Hz) / 中域 / カイシャ(2kHz〜) の3グループに掛ける */
+const W_PRESETS = {surdo:[1.35,0.90,0.60], flat:[1,1,1], caixa:[0.60,0.90,1.35]};
+const ALPHA = 0.9;        // 累積スコアの慣性（BTrack）
+const TIGHT = 5;          // 対数ガウス遷移窓の鋭さ（BTrack）
 
 const S = {
   running:false, mode:"idle",       // idle | mic | test
   ctx:null, stream:null, track:null, node:null, inBus:null, monitor:null,
   fsEnv:0, hopDur:0,
-  bpmMin:90, bpmMax:175, weights:W_PRESETS.surdo.slice(), wKey:"surdo",
-  gain:600, winSec:6, meter:2, tol:1.5, target:null,
+  bpmMin:90, bpmMax:175, weights:W_PRESETS.flat.slice(), wKey:"flat",
+  gain:55, gate:0.002, winSec:6, meter:2, tol:1.5, target:null,
   click:false, wake:false, hold:false,
   // リングバッファ
-  cL:new Float32Array(RING), cM:new Float32Array(RING), cH:new Float32Array(RING),
-  ons:new Float32Array(RING), tAt:new Float64Array(RING),
+  ons:new Float32Array(RING),       // オンセット検出関数
+  cum:new Float32Array(RING),       // 累積スコア
+  tAt:new Float64Array(RING),
   n:0,                              // 書き込んだ総フレーム数
   lvl:[0,0,0], peak:0,
-  scratch:new Float32Array(RING),
+  scratch:new Float32Array(RING), scratch2:new Float32Array(RING),
+  pre:new Float64Array(RING+1), acf:new Float32Array(RING), predBuf:new Float32Array(1024),
+  cumW:null, cumWP:0, prevLag:0,
   // 推定結果
   bpm:0, disp:0, conf:0, period:0, jitter:0,
   raws:[],                          // 直近の生推定
-  beat:{ref:0, period:0, locked:false, idx:0, anchor:0, scheduled:-1},
+  beat:{locked:false, period:0, pFrames:0, nextFrame:-1, predictAt:-1,
+        nextTime:0, lastTime:0, idx:0, anchor:0, clicked:-1, shown:-1},
   hist:[],                          // {t,bpm,conf}
   stats:{n:0, sum:0, min:Infinity, max:0, t0:null, first:0, lastT:0},
-  test:{on:false, bpm:132, timer:null, next:0, step:0, noise:null},
+  test:{on:false, bpm:132, timer:null, next:0, step:0, noise:null, bed:null},
   wakeLock:null, lastEst:0, lastGraph:0, lowSince:0
 };
 
@@ -517,7 +535,7 @@ function setDigits(node, str){
 /* ============================================================
    設定の保存／復元
    ============================================================ */
-const STORE = "bateria-bpm/v1";
+const STORE = "bateria-bpm/v2";
 function saveCfg(){
   try{
     localStorage.setItem(STORE, JSON.stringify({
@@ -541,7 +559,9 @@ function loadCfg(){
     S.click = !!c.click; S.wake = !!c.wake;
     if(c.testBpm) el.testBpm.value = c.testBpm;
   }
+  setWeights(S.wKey, true);
   el.sens.value = S.gain;
+  applyGate();
   el.tol.value = S.tol;
   el.target.value = (S.target == null ? "" : S.target);
   el.optClick.checked = S.click;
@@ -556,7 +576,9 @@ function loadCfg(){
 function syncSeg(seg, test){
   for(const b of seg.querySelectorAll("button")) b.setAttribute("aria-pressed", test(b) ? "true" : "false");
 }
-const sensWord = g => (g<400 ? "低め（大音量向き）" : g<1200 ? "標準" : "高め（遠い・小音量向き）");
+/* 感度スライダー(0〜100)は入力のノイズゲートを決める。高いほど小さな音も拾う */
+function applyGate(){ S.gate = Math.pow(10, (-30 - 0.45*S.gain)/20); }
+const sensWord = g => (g<30 ? "低め（至近・大音量向き）" : g<70 ? "標準" : "高め（遠い・小音量向き）");
 
 /* ============================================================
    範囲・重み
@@ -577,47 +599,125 @@ function renderRange(){
 function setWeights(key, silent){
   S.wKey = key; S.weights = W_PRESETS[key].slice();
   syncSeg(el.segWeight, b => b.dataset.w === key);
+  pushWeights();
   if(!silent) saveCfg();
 }
 
 /* ============================================================
    オーディオグラフ
    ============================================================ */
-const WORKLET_SRC = `
-class BandEnv extends AudioWorkletProcessor {
-  constructor(){ super(); this.k = 0; this.out = new Float32Array(${POST} * 4); }
-  process(inputs){
-    const inp = inputs[0];
-    const n = 128;
-    let a = 0, b = 0, c = 0, pk = 0;
-    if(inp && inp.length){
-      const c0 = inp[0], c1 = inp[1], c2 = inp[2], c3 = inp[3];
-      if(c0) for(let i=0;i<n;i++){ const v = c0[i]; a += v*v; }
-      if(c1) for(let i=0;i<n;i++){ const v = c1[i]; b += v*v; }
-      if(c2) for(let i=0;i<n;i++){ const v = c2[i]; c += v*v; }
-      if(c3) for(let i=0;i<n;i++){ const v = c3[i] < 0 ? -c3[i] : c3[i]; if(v > pk) pk = v; }
+/* 反復基数2FFT。worklet側へはこの関数のソースをそのまま埋め込んで共有する */
+function makeFFT(n){
+  const levels = Math.round(Math.log(n)/Math.LN2);
+  const rev = new Uint32Array(n);
+  for(let i=0;i<n;i++){ let x=i, r=0; for(let j=0;j<levels;j++){ r=(r<<1)|(x&1); x>>=1; } rev[i]=r; }
+  const cs = new Float32Array(n>>1), sn = new Float32Array(n>>1);
+  for(let i=0;i<(n>>1);i++){ cs[i]=Math.cos(2*Math.PI*i/n); sn[i]=Math.sin(2*Math.PI*i/n); }
+  const re = new Float32Array(n), im = new Float32Array(n);
+  return {re:re, im:im, run:function(src){
+    for(let i=0;i<n;i++){ re[i]=src[rev[i]]; im[i]=0; }
+    for(let size=2;size<=n;size<<=1){
+      const half=size>>1, step=(n/size)|0;
+      for(let i=0;i<n;i+=size){
+        for(let j=i,k=0;j<i+half;j++,k+=step){
+          const l=j+half;
+          const tr = re[l]*cs[k] + im[l]*sn[k];
+          const ti = -re[l]*sn[k] + im[l]*cs[k];
+          re[l]=re[j]-tr; im[l]=im[j]-ti;
+          re[j]+=tr;      im[j]+=ti;
+        }
+      }
     }
-    const o = this.k * 4;
-    this.out[o] = Math.sqrt(a/n); this.out[o+1] = Math.sqrt(b/n);
-    this.out[o+2] = Math.sqrt(c/n); this.out[o+3] = pk;
-    if(++this.k >= ${POST}){
-      this.k = 0;
-      this.port.postMessage({t: currentTime, d: this.out.slice(0)});
+  }};
+}
+
+/* 複素スペクトル差分(半波整流)によるオンセット検出関数。
+   Duxbury/Davies/Sandler 2003、Dixon 2006、BTrack の実装に基づく独自実装。 */
+function makeOdfCore(opt){
+  const N = opt.N, H = opt.H, nb = N>>1;
+  const ring = new Float32Array(N);
+  const win  = new Float32Array(N);
+  for(let i=0;i<N;i++) win[i] = 0.5 - 0.5*Math.cos(2*Math.PI*i/N);
+  const frame = new Float32Array(N);
+  const fft = makeFFT(N);
+  const pMag = new Float32Array(nb), pPh1 = new Float32Array(nb), pPh2 = new Float32Array(nb);
+  let bw = opt.bw;                       // ビンごとの重み
+  const e1 = opt.e1, e2 = opt.e2;        // レベルメーター用の帯域境界ビン
+  let w = 0, filled = 0, acc = 0, peak = 0;
+  const lv = new Float32Array(3);
+  const sc = 4/N;
+  return {
+    setWeights: function(v){ bw = v; },
+    /* 128サンプル投入。Hサンプル溜まるたびに解析して結果を push する */
+    push: function(src, out){
+      for(let i=0;i<QUANTUM;i++){
+        const v = src ? src[i] : 0;
+        ring[w] = v; w = (w+1) % N;
+        const a = v<0 ? -v : v; if(a>peak) peak = a;
+      }
+      if(filled < N) filled += QUANTUM;
+      acc += QUANTUM;
+      while(acc >= H){
+        acc -= H;
+        if(filled < N) continue;
+        for(let i=0;i<N;i++) frame[i] = ring[(w+i)%N]*win[i];
+        fft.run(frame);
+        const re = fft.re, im = fft.im;
+        let sum = 0; lv[0]=0; lv[1]=0; lv[2]=0;
+        for(let k=1;k<nb;k++){
+          const rr = re[k], ii = im[k];
+          const mag = Math.sqrt(rr*rr + ii*ii);
+          const ph  = Math.atan2(ii, rr);
+          if(mag > pMag[k]){
+            // 直前2フレームからの線形外挿 φ̂ = 2φ₋₁ − φ₋₂ との複素距離
+            const dev = ph - 2*pPh1[k] + pPh2[k];
+            const d2 = mag*mag + pMag[k]*pMag[k] - 2*mag*pMag[k]*Math.cos(dev);
+            if(d2 > 0) sum += Math.sqrt(d2) * bw[k];
+          }
+          pPh2[k] = pPh1[k]; pPh1[k] = ph; pMag[k] = mag;
+          const g = k < e1 ? 0 : (k < e2 ? 1 : 2);
+          if(mag > lv[g]) lv[g] = mag;          // 帯域内のピーク（帯域幅に左右されない）
+        }
+        out.push(sum*sc, peak, lv[0]*sc, lv[1]*sc, lv[2]*sc);
+        peak = 0;
+      }
+    }
+  };
+}
+
+const WORKLET_SRC = `
+const QUANTUM = ${QUANTUM};
+${makeFFT.toString()}
+${makeOdfCore.toString()}
+class OdfProcessor extends AudioWorkletProcessor {
+  constructor(o){
+    super();
+    this.core = makeOdfCore(o.processorOptions);
+    this.buf = [];
+    this.post = ${POST};
+    this.sink = {push:(a,b,c,d,e)=>{ this.buf.push(a,b,c,d,e); }};
+    this.port.onmessage = e => { if(e.data && e.data.bw) this.core.setWeights(e.data.bw); };
+  }
+  process(inputs){
+    const ch = inputs[0] && inputs[0][0];
+    this.core.push(ch, this.sink);
+    if(this.buf.length >= this.post*5){
+      this.port.postMessage({t: currentTime + (QUANTUM - ${FRAME}/2)/sampleRate,
+                             d: Float32Array.from(this.buf)});
+      this.buf.length = 0;
     }
     return true;
   }
 }
-registerProcessor('band-env', BandEnv);
+registerProcessor('odf', OdfProcessor);
 `;
 
-function bq(ctx, type, freq, q){
-  const f = ctx.createBiquadFilter();
-  f.type = type; f.frequency.value = freq; f.Q.value = q;
-  return f;
-}
-function chain(nodes){
-  for(let i=0;i<nodes.length-1;i++) nodes[i].connect(nodes[i+1]);
-  return {head:nodes[0], tail:nodes[nodes.length-1]};
+function binWeights(sr){
+  const w = new Float32Array(NBINS);
+  const e1 = Math.max(2, Math.round(150*FRAME/sr));
+  const e2 = Math.max(e1+1, Math.round(2000*FRAME/sr));
+  for(let k=0;k<NBINS;k++) w[k] = S.weights[k<e1 ? 0 : (k<e2 ? 1 : 2)];
+  return {w, e1, e2};
 }
 
 async function buildGraph(){
@@ -629,18 +729,11 @@ async function buildGraph(){
 
   // 入力バス：マイクでも内蔵テスト音源でも、ここから先は同じ経路
   const inBus = ctx.createGain(); inBus.gain.value = 1; S.inBus = inBus;
+  const hp = ctx.createBiquadFilter(); hp.type = "highpass"; hp.frequency.value = 28; hp.Q.value = 0.7;
+  inBus.connect(hp);
 
-  const low  = chain([bq(ctx,"lowpass",105,0.9), bq(ctx,"lowpass",105,0.9), bq(ctx,"highpass",38,0.7)]);
-  const mid  = chain([bq(ctx,"highpass",220,0.7), bq(ctx,"lowpass",1400,0.7)]);
-  const high = chain([bq(ctx,"highpass",2600,0.7), bq(ctx,"lowpass",9000,0.7)]);
-  const raw  = bq(ctx,"highpass",25,0.7);
-  inBus.connect(low.head); inBus.connect(mid.head); inBus.connect(high.head); inBus.connect(raw);
-
-  const merger = ctx.createChannelMerger(4);
-  low.tail.connect(merger, 0, 0);
-  mid.tail.connect(merger, 0, 1);
-  high.tail.connect(merger, 0, 2);
-  raw.connect(merger, 0, 3);
+  const bwd = binWeights(ctx.sampleRate);
+  const opts = {N:FRAME, H:HOP, bw:bwd.w, e1:bwd.e1, e2:bwd.e2};
 
   let node = null, ok = false;
   if(ctx.audioWorklet){
@@ -648,39 +741,33 @@ async function buildGraph(){
       const url = URL.createObjectURL(new Blob([WORKLET_SRC], {type:"application/javascript"}));
       await ctx.audioWorklet.addModule(url);
       URL.revokeObjectURL(url);
-      node = new AudioWorkletNode(ctx, "band-env", {
+      node = new AudioWorkletNode(ctx, "odf", {
         numberOfInputs:1, numberOfOutputs:1, outputChannelCount:[1],
-        channelCount:4, channelCountMode:"explicit", channelInterpretation:"discrete"
+        channelCount:1, channelCountMode:"explicit",
+        processorOptions:opts
       });
-      node.port.onmessage = e => onEnvelope(e.data);
+      node.port.onmessage = e => onOdf(e.data);
       ok = true;
     }catch(err){ node = null; }
   }
   if(!ok){
-    // 古いSafari向けフォールバック
-    node = ctx.createScriptProcessor(512, 4, 1);
+    // AudioWorklet非対応（古いSafari等）。同じ解析核をメインスレッドで回す
+    const core = makeOdfCore(opts);
+    const buf = [];
+    const sink = {push:(a,b,c,d,e)=>buf.push(a,b,c,d,e)};
+    node = ctx.createScriptProcessor(512, 1, 1);
+    S.fallbackCore = core;
     node.onaudioprocess = ev => {
-      const b = ev.inputBuffer, len = b.length, hops = Math.floor(len / HOP);
-      const ch = [];
-      for(let c=0;c<4;c++) ch.push(b.numberOfChannels > c ? b.getChannelData(c) : null);
-      const out = new Float32Array(hops*4);
-      for(let h=0;h<hops;h++){
-        let a=0,m=0,t=0,pk=0;
-        const off = h*HOP;
-        for(let i=0;i<HOP;i++){
-          if(ch[0]){ const v=ch[0][off+i]; a+=v*v; }
-          if(ch[1]){ const v=ch[1][off+i]; m+=v*v; }
-          if(ch[2]){ const v=ch[2][off+i]; t+=v*v; }
-          if(ch[3]){ const v=Math.abs(ch[3][off+i]); if(v>pk) pk=v; }
-        }
-        out[h*4]=Math.sqrt(a/HOP); out[h*4+1]=Math.sqrt(m/HOP);
-        out[h*4+2]=Math.sqrt(t/HOP); out[h*4+3]=pk;
+      const ch = ev.inputBuffer.getChannelData(0);
+      for(let off=0; off+QUANTUM<=ch.length; off+=QUANTUM) core.push(ch.subarray(off, off+QUANTUM), sink);
+      if(buf.length){
+        onOdf({t:ctx.currentTime + (QUANTUM-FRAME/2)/ctx.sampleRate, d:Float32Array.from(buf)});
+        buf.length = 0;
       }
-      onEnvelope({t:ctx.currentTime, d:out});
     };
   }
   S.node = node;
-  merger.connect(node);
+  hp.connect(node);
 
   // 解析ノードを無音でdestinationへ繋ぐ（Safariでグラフが駆動されるように）
   const mute = ctx.createGain(); mute.gain.value = 0;
@@ -693,33 +780,104 @@ async function buildGraph(){
   return ctx;
 }
 
+function pushWeights(){
+  if(!S.ctx) return;
+  const bwd = binWeights(S.ctx.sampleRate);
+  if(S.node && S.node.port) S.node.port.postMessage({bw:bwd.w});
+  else if(S.fallbackCore) S.fallbackCore.setWeights(bwd.w);
+}
+
 /* ============================================================
-   包絡線の受信とオンセット強度関数
+   ODFの受信 → 累積スコア更新 → 拍の予測
    ============================================================ */
-function onEnvelope(msg){
-  const d = msg.d, cnt = (d.length/4)|0;
-  const tLast = msg.t;
+function onOdf(msg){
+  const d = msg.d, cnt = (d.length/5)|0;
   for(let i=0;i<cnt;i++){
-    const o = i*4;
-    const t = tLast - (cnt-1-i)*S.hopDur;
-    const g = S.gain;
-    const cl = Math.log1p(d[o]   * g);
-    const cm = Math.log1p(d[o+1] * g);
-    const chh= Math.log1p(d[o+2] * g);
-    const idx = S.n & (RING-1), prev = (S.n-1) & (RING-1);
-    let flux = 0;
-    if(S.n > 0){
-      const dl = cl - S.cL[prev], dm = cm - S.cM[prev], dh = chh - S.cH[prev];
-      flux = (dl>0?dl:0)*S.weights[0] + (dm>0?dm:0)*S.weights[1] + (dh>0?dh:0)*S.weights[2];
-    }
-    S.cL[idx]=cl; S.cM[idx]=cm; S.cH[idx]=chh;
-    S.ons[idx]=flux; S.tAt[idx]=t;
+    const o = i*5;
+    const peak = d[o+1];
+    const odf = peak < S.gate ? 0 : d[o];     // ノイズゲート
+    const idx = S.n & (RING-1);
+    S.ons[idx] = odf;
+    S.tAt[idx] = msg.t - (cnt-1-i)*S.hopDur;
+    updateCumulative(odf, idx);
+    stepBeat(S.n, S.tAt[idx]);
     S.n++;
-    S.lvl[0] = Math.max(S.lvl[0]*0.92, Math.min(1, cl/4.2));
-    S.lvl[1] = Math.max(S.lvl[1]*0.92, Math.min(1, cm/4.2));
-    S.lvl[2] = Math.max(S.lvl[2]*0.92, Math.min(1, chh/4.2));
-    S.peak = Math.max(S.peak*0.95, d[o+3]);
+    S.peak = Math.max(S.peak*0.97, peak);
+    for(let g=0; g<3; g++){
+      const db = 20*Math.log10(d[o+2+g] + 1e-7);      // −60dB〜0dB を 0〜1 に
+      S.lvl[g] = Math.max(S.lvl[g]*0.9, clamp((db+60)/60, 0, 1));
+    }
   }
+}
+
+/* 対数ガウス遷移窓の重みテーブル。拍周期が変わった時だけ作り直す */
+function cumWeights(P){
+  if(S.cumW && Math.abs(S.cumWP - P) < 0.5) return S.cumW;
+  const start = Math.round(2*P), end = Math.max(1, Math.round(P/2));
+  const w = new Float32Array(start+1);
+  for(let v=end; v<=start; v++){
+    const a = TIGHT*Math.log(v/P);
+    w[v] = Math.exp(-0.5*a*a);
+  }
+  w.start = start; w.end = end;
+  S.cumW = w; S.cumWP = P;
+  return w;
+}
+
+/* 累積スコア: C[i] = (1−α)·odf[i] + α·max_v( C[i−v]·w(v) )  （BTrack / Ellis） */
+function updateCumulative(odf, idx){
+  const P = S.beat.pFrames;
+  if(!(P >= 6) || S.n < 2*P){ S.cum[idx] = odf; return; }
+  const w = cumWeights(P);
+  let best = 0;
+  for(let v=w.end; v<=w.start; v++){
+    const c = S.cum[(S.n - v) & (RING-1)] * w[v];
+    if(c > best) best = c;
+  }
+  S.cum[idx] = (1-ALPHA)*odf + ALPHA*best;
+}
+
+/* 次の拍位置を予測。累積スコアを1拍ぶん先へ外挿し、ガウス期待窓で最大点を選ぶ */
+function predictBeat(){
+  const b = S.beat, P = b.pFrames, Pi = Math.round(P);
+  if(!(Pi >= 6) || S.n < 2.5*P) return false;
+  const w = cumWeights(P);
+  const back = w.start;
+  const tmp = S.predBuf;
+  for(let i=0;i<back;i++) tmp[i] = S.cum[(S.n - back + i) & (RING-1)];
+  let bi = Math.round(P/2), bv = -1;
+  for(let j=0;j<Pi;j++){
+    let best = 0;
+    for(let v=w.end; v<=w.start; v++){
+      const c = tmp[back + j - v] * w[v];
+      if(c > best) best = c;
+    }
+    tmp[back + j] = best;                      // α=1・入力0で先へ伸ばす
+    const x = (j - P/2)/(P/2);                 // 半拍先を中心とするガウス期待窓
+    const s = best * Math.exp(-0.5*x*x);
+    if(s > bv){ bv = s; bi = j; }
+  }
+  b.nextFrame = S.n + bi;
+  return true;
+}
+
+/* 1フレーム進める。拍が来たらカウントを進め、半拍後に次の予測を仕込む */
+function stepBeat(frame, tNow){
+  const b = S.beat;
+  if(!b.locked || !(b.pFrames >= 6)) return;
+  if(b.nextFrame < 0){ if(predictBeat()) b.predictAt = -1; return; }
+  if(frame >= b.nextFrame){
+    b.idx++;
+    b.lastTime = tNow;
+    b.predictAt = frame + Math.max(1, Math.round(b.pFrames/2));
+    b.nextFrame = frame + Math.round(b.pFrames);   // 予測が入るまでの暫定値
+  }
+  if(b.predictAt > 0 && frame >= b.predictAt){
+    b.predictAt = -1;
+    predictBeat();
+  }
+  // 次の拍の「予定時刻」を音声クロックで持っておく（表示とクリック音のため）
+  b.nextTime = tNow + (b.nextFrame - frame)*S.hopDur;
 }
 
 /* ============================================================
@@ -727,88 +885,88 @@ function onEnvelope(msg){
    ============================================================ */
 function estimate(){
   const fs = S.fsEnv;
-  const want = Math.round(S.winSec * fs);
-  const N = Math.min(S.n, want, RING - 8);
-  const lagMin = Math.floor(fs*60/S.bpmMax);
+  const N = Math.min(S.n, Math.round(S.winSec*fs), RING - 8);
+  const lagMin = Math.max(2, Math.floor(fs*60/S.bpmMax));
   const lagMax = Math.ceil(fs*60/S.bpmMin);
   if(N < lagMax*3 + 16) return null;          // 最低3周期ぶん溜まるまで待つ
 
-  // リングから連続領域へコピー
-  const x = S.scratch;
-  const base = S.n - N;
-  for(let i=0;i<N;i++) x[i] = S.ons[(base+i) & (RING-1)];
+  // 1) 適応的しきい値：局所平均（前8・後7フレーム）を引いて半波整流
+  const x = S.scratch, y = S.scratch2, pre = S.pre, base = S.n - N;
+  pre[0] = 0;
+  for(let i=0;i<N;i++){ x[i] = S.ons[(base+i)&(RING-1)]; pre[i+1] = pre[i] + x[i]; }
+  for(let i=0;i<N;i++){
+    const lo = i<8 ? 0 : i-8, hi = i+8>N ? N : i+8;
+    const v = x[i] - (pre[hi]-pre[lo])/(hi-lo);
+    y[i] = v>0 ? v : 0;
+  }
 
-  // 平均と分散を除去
-  let mean = 0;
-  for(let i=0;i<N;i++) mean += x[i];
-  mean /= N;
-  let va = 0;
-  for(let i=0;i<N;i++){ const v = x[i]-mean; x[i]=v; va += v*v; }
-  va /= N;
-  if(va < 1e-10) return null;
+  // 2) 平均・分散で正規化して自己相関
+  let mean = 0; for(let i=0;i<N;i++) mean += y[i]; mean /= N;
+  let va = 0; for(let i=0;i<N;i++){ const v = y[i]-mean; y[i]=v; va += v*v; } va /= N;
+  if(va < 1e-12) return null;
 
-  // 自己相関（倍音項のため探索上限の2倍強まで）
-  const lagTop = Math.min(2*lagMax + 4, Math.floor(N*0.62));
-  const r = new Float32Array(lagTop+2);
-  for(let L=lagMin; L<=lagTop; L++){
-    let s = 0;
-    const lim = N - L;
-    for(let i=0;i<lim;i++) s += x[i]*x[i+L];
+  const lagTop = Math.min(4*lagMax + 4, Math.floor(N*0.7));
+  const r = S.acf;
+  for(let L=1; L<=lagTop; L++){
+    let s = 0; const lim = N - L;
+    for(let i=0;i<lim;i++) s += y[i]*y[i+L];
     r[L] = (s/lim)/va;
   }
 
-  // スコア：倍音和・テンポ事前分布・連続性ボーナス
+  // 3) 櫛形フィルタバンク：周期の1〜4倍を 1/3/5/7 タップで束ね、レイリー重みを掛ける
   const centre = S.target || Math.sqrt(S.bpmMin*S.bpmMax);
-  const curL = (S.beat.locked && S.period > 0) ? (fs*60/S.disp) : 0;
-  let bestL = -1, best = -Infinity, sum = 0, cntS = 0;
-  for(let L=lagMin; L<=lagMax; L++){
-    let sc = r[L];
-    if(2*L <= lagTop) sc += 0.55*r[2*L];
-    if(3*L <= lagTop) sc += 0.30*r[3*L];
-    const bpm = 60*fs/L;
-    sc *= Math.exp(-0.5*Math.pow(Math.log2(bpm/centre)/0.85, 2));
-    if(curL > 0){
-      const dz = (L-curL)/(0.055*curL);
-      sc *= 1 + 0.22*Math.exp(-0.5*dz*dz);
+  const beta = fs*60/centre;                    // レイリー分布のピーク位置＝想定テンポ
+  const b2 = beta*beta;
+  let best = -Infinity, bestL = -1, sum = 0, cnt = 0;
+  for(let p=lagMin; p<=lagMax; p++){
+    let s = 0;
+    for(let a=1;a<=4;a++){
+      let t = 0, m = 0;
+      for(let off=1-a; off<=a-1; off++){
+        const lag = a*p + off;
+        if(lag>=1 && lag<=lagTop){ t += r[lag]; m++; }
+      }
+      if(m) s += t/m;
     }
-    sum += sc; cntS++;
-    if(sc > best){ best = sc; bestL = L; }
+    let sc = s * (p/b2)*Math.exp(-(p*p)/(2*b2));
+    if(S.prevLag > 0){                          // 直前のテンポ仮説からの遷移重み
+      const z = (p - S.prevLag)/(0.07*S.prevLag);
+      sc *= 0.45 + 0.55*Math.exp(-0.5*z*z);
+    }
+    sum += sc; cnt++;
+    if(sc > best){ best = sc; bestL = p; }
   }
   if(bestL < 0) return null;
-  const meanS = sum/cntS;
 
-  // 放物線補間で lag を細かく求める
+  // 4) 周期を精密化。lag分解能そのものが粗い（速いテンポほど1ラグが効く）ので、
+  //    使える範囲でいちばん高次のピーク（最大4周期ぶん）を補間して a で割る
   let Lr = bestL;
-  if(bestL > lagMin && bestL < lagTop){
-    const y0=r[bestL-1], y1=r[bestL], y2=r[bestL+1];
-    const den = y0 - 2*y1 + y2;
+  for(let a=4; a>=1; a--){
+    const c = Math.round(a*bestL);
+    if(c-1 < 1 || c+1 > lagTop) continue;
+    const span = a>1 ? Math.round(a/2) : 0;
+    let pk = -Infinity, pi = -1;
+    for(let L=c-span; L<=c+span; L++){
+      if(L-1 < 1 || L+1 > lagTop) continue;
+      if(r[L] > pk){ pk = r[L]; pi = L; }
+    }
+    if(pi < 0 || r[pi] < r[pi-1] || r[pi] < r[pi+1]) continue;   // 極大であること
+    const y0=r[pi-1], y1=r[pi], y2=r[pi+1], den = y0 - 2*y1 + y2;
+    let L2 = pi;
     if(Math.abs(den) > 1e-9){
       const dd = 0.5*(y0-y2)/den;
-      if(dd > -1 && dd < 1) Lr = bestL + dd;
+      if(dd > -1 && dd < 1) L2 = pi + dd;
     }
+    Lr = L2/a;
+    break;
   }
-  const bpm = 60*fs/Lr;
+  const meanS = sum/cnt;
   const prom = (best - meanS)/(Math.abs(best)+1e-9);
-  const conf = clamp(0.55*clamp(r[bestL]/0.22, 0, 1) + 0.45*clamp(prom/0.45, 0, 1), 0, 1);
-  S.dbg = {peak:r[bestL], prom, N};
+  const conf = clamp(0.5*clamp(r[bestL]/0.18, 0, 1) + 0.5*clamp(prom/0.5, 0, 1), 0, 1);
+  S.dbg = {peak:r[bestL], prom, N, lag:bestL};
+  S.prevLag = bestL;
 
-  // 位相（直近のビート位置）
-  const P = Math.round(Lr);
-  let bestPh = 0, bestV = -Infinity;
-  const nb = Math.min(10, Math.floor(N/P) - 1);
-  for(let ph=0; ph<P; ph++){
-    let s = 0, w = 1;
-    for(let k=0;k<nb;k++){
-      const idx = N-1-ph-Math.round(k*Lr);
-      if(idx < 1) break;
-      s += x[idx]*w; w *= 0.88;
-    }
-    if(s > bestV){ bestV = s; bestPh = ph; }
-  }
-  const tNewest = S.tAt[(S.n-1) & (RING-1)];
-  const lastBeat = tNewest - bestPh/fs;
-
-  return {bpm, conf, period:Lr/fs, lastBeat};
+  return {bpm:60*fs/Lr, conf, period:Lr/fs};
 }
 
 /* ---------- 推定結果の取り込み（中央値＋PLL） ---------- */
@@ -818,7 +976,10 @@ function applyEstimate(e){
 
   if(e.conf < 0.12){
     if(!S.lowSince) S.lowSince = now;
-    if(now - S.lowSince > 2.5){ S.beat.locked = false; S.raws.length = 0; }
+    if(now - S.lowSince > 2.5){
+      S.beat.locked = false; S.beat.nextFrame = -1; S.beat.predictAt = -1;
+      S.raws.length = 0; S.prevLag = 0;
+    }
     return;
   }
   S.lowSince = 0;
@@ -841,16 +1002,13 @@ function applyEstimate(e){
   }
   S.period = 60/S.disp;
 
-  // 位相PLL
+  // 拍の追従は累積スコア法（stepBeat / predictBeat）が行う。ここでは周期だけ渡す
   const b = S.beat;
+  b.period = S.period;
+  b.pFrames = S.period * S.fsEnv;
   if(!b.locked){
-    b.ref = e.lastBeat; b.period = e.period; b.locked = true;
-    b.idx = Math.floor((now - b.ref)/b.period); b.anchor = b.idx;
-  }else{
-    b.period += (S.period - b.period)*0.30;
-    let err = e.lastBeat - b.ref;
-    err -= b.period*Math.round(err/b.period);
-    b.ref += 0.20*err;
+    b.locked = true; b.nextFrame = -1; b.predictAt = -1;
+    b.idx = 0; b.anchor = 0; b.shown = -1; b.clicked = -1;
   }
 
   // 履歴・統計
@@ -1040,13 +1198,13 @@ function drawScope(){
   }
   // ビート位置
   const b = S.beat;
-  if(b.locked && b.period > 0.1){
+  if(b.locked && b.period > 0.1 && b.nextTime > 0){
     const tStart = S.tAt[base & (RING-1)], tEnd = S.tAt[(S.n-1)&(RING-1)];
     g.strokeStyle = "rgba(255,194,74,.85)"; g.lineWidth = 1.5;
-    let k = Math.ceil((tStart - b.ref)/b.period);
     for(let i=0;i<64;i++){
-      const t = b.ref + (k+i)*b.period;
-      if(t > tEnd) break;
+      const t = b.nextTime - i*b.period;
+      if(t < tStart) break;
+      if(t > tEnd) continue;
       const xx = (t - tStart)/(tEnd - tStart)*w;
       g.beginPath(); g.moveTo(xx, 2); g.lineTo(xx, h-2); g.stroke();
     }
@@ -1083,18 +1241,15 @@ function loop(){
   el.lvH.style.width = (S.lvl[2]*100).toFixed(1)+"%";
   S.lvl[0]*=0.97; S.lvl[1]*=0.97; S.lvl[2]*=0.97;
 
-  // 拍の位相
+  // 拍の位相（予測された次の拍の時刻を基準にする）
   const b = S.beat;
-  if(S.running && b.locked && b.period > 0.1){
-    const ph = ((now - b.ref)/b.period) % 1;
-    const p = ph < 0 ? ph+1 : ph;
+  if(S.running && b.locked && b.period > 0.1 && b.nextTime > 0){
+    const ref = now >= b.nextTime ? b.nextTime : b.nextTime - b.period;
+    let p = (now - ref)/b.period;
+    p = p < 0 ? 0 : (p > 1 ? 1 : p);
     el.phaseArc.setAttribute("stroke-dasharray", p.toFixed(4)+" 1");
     el.glow.style.opacity = (Math.exp(-p*7)*0.95).toFixed(3);
-    const idx = Math.floor((now - b.ref)/b.period);
-    if(idx !== b.idx){
-      b.idx = idx;
-      flashBeat(barPos(idx));
-    }
+    if(b.shown !== b.idx){ b.shown = b.idx; flashBeat(barPos(b.idx)); }
   }else{
     el.phaseArc.setAttribute("stroke-dasharray", "0 1");
     el.glow.style.opacity = "0";
@@ -1138,19 +1293,13 @@ function updateReadout(){
 }
 
 /* ---------- クリック音 ---------- */
+/* 次の拍は半拍ぶん先に予測済みなので、その時刻ちょうどに1回だけ予約する */
 function scheduleClicks(now){
-  const b = S.beat, ctx = S.ctx;
-  const horizon = now + 0.25;
-  let k = Math.max(b.scheduled+1, Math.ceil((now - b.ref)/b.period));
-  for(let i=0;i<4;i++){
-    const t = b.ref + k*b.period;
-    if(t > horizon) break;
-    if(t > now + 0.01){
-      beep(t, barPos(k) === 0);
-      b.scheduled = k;
-    }
-    k++;
-  }
+  const b = S.beat;
+  if(b.clicked === b.idx) return;
+  if(!(b.nextTime > now + 0.02)) return;
+  b.clicked = b.idx;
+  beep(b.nextTime, barPos(b.idx+1) === 0);
 }
 function beep(t, accent){
   const ctx = S.ctx; if(!ctx) return;
@@ -1177,16 +1326,24 @@ function noiseBuffer(ctx){
   S.test.noise = buf;
   return buf;
 }
-function surdoHit(t, amp){
+/* スルド。f0は楽器ごと（1ª/2ª/3ª）。長く鳴き続けて次の打点に重なる */
+function surdoHit(t, amp, f0, ring){
   const ctx = S.ctx;
   const o = ctx.createOscillator(), o2 = ctx.createOscillator(), g = ctx.createGain();
-  o.type="sine";  o.frequency.setValueAtTime(92, t);  o.frequency.exponentialRampToValueAtTime(58, t+0.14);
-  o2.type="sine"; o2.frequency.setValueAtTime(140, t); o2.frequency.exponentialRampToValueAtTime(90, t+0.06);
+  o.type="sine";  o.frequency.setValueAtTime(f0*1.55, t); o.frequency.exponentialRampToValueAtTime(f0, t+0.14);
+  o2.type="sine"; o2.frequency.setValueAtTime(f0*2.3, t); o2.frequency.exponentialRampToValueAtTime(f0*1.5, t+0.06);
   g.gain.setValueAtTime(0.0001, t);
   g.gain.exponentialRampToValueAtTime(amp, t+0.006);
-  g.gain.exponentialRampToValueAtTime(0.0001, t+0.30);
+  g.gain.exponentialRampToValueAtTime(0.0001, t+ring);
   o.connect(g); o2.connect(g); g.connect(S.inBus); g.connect(S.monitor);
-  o.start(t); o2.start(t); o.stop(t+0.34); o2.stop(t+0.34);
+  o.start(t); o2.start(t); o.stop(t+ring+0.04); o2.stop(t+ring+0.04);
+}
+/* 人の演奏のばらつき（標準偏差 ms） */
+function jit(ms){
+  let u=0, v=0;
+  while(u===0) u=Math.random();
+  while(v===0) v=Math.random();
+  return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v)*ms/1000;
 }
 function noiseHit(t, amp, freq, q, dur){
   const ctx = S.ctx;
@@ -1211,16 +1368,40 @@ function runTestScheduler(){
     const in16 = k % 16;                      // 2小節（4拍）周期
     const beatPos = k % 4;
     if(beatPos === 0){
+      // 3台のスルドが前後にばらつきながら鳴り、次の拍まで鳴き続ける
       const beatNo = (k/4) % 2;               // 2/4の1拍目/2拍目
-      surdoHit(t, beatNo === 1 ? 0.60 : 0.42);
+      if(beatNo === 1){
+        surdoHit(t + jit(9), 0.52, 62, 0.50); // 1ª（2拍目アクセント）
+        surdoHit(t + jit(11), 0.30, 80, 0.42);// 2ª
+      }else{
+        surdoHit(t + jit(9), 0.34, 80, 0.46); // 2ª
+        surdoHit(t + jit(12), 0.20, 100, 0.34);
+      }
+      if(in16 === 8) surdoHit(t + jit(10), 0.22, 100, 0.30); // 3ª の装飾
     }
     // カイシャ：16分の刻み（アクセント付き）
-    noiseHit(t, (beatPos === 0 ? 0.11 : (beatPos === 2 ? 0.085 : 0.055)), 5200, 1.1, 0.028);
+    noiseHit(t + jit(7), (beatPos === 0 ? 0.11 : (beatPos === 2 ? 0.085 : 0.055)), 5200, 1.1, 0.028);
+    // シャカシャカ（常時16分）
+    noiseHit(t + jit(8), 0.045, 8000, 0.8, 0.022);
     // タンボリン
-    if(TAMBORIM.indexOf(in16 % 16) >= 0) noiseHit(t, 0.075, 1150, 3.2, 0.05);
+    if(TAMBORIM.indexOf(in16 % 16) >= 0) noiseHit(t + jit(9), 0.075, 1150, 3.2, 0.05);
     S.test.next = t + s16;
     S.test.step = k + 1;
   }
+}
+
+/* 暗騒音（会場のざわめき相当） */
+function startRoomNoise(){
+  const ctx = S.ctx; if(!ctx || S.test.bed) return;
+  const src = ctx.createBufferSource(); src.buffer = noiseBuffer(ctx); src.loop = true;
+  const f = ctx.createBiquadFilter(); f.type="lowpass"; f.frequency.value = 900;
+  const g = ctx.createGain(); g.gain.value = 0.004;
+  src.connect(f); f.connect(g); g.connect(S.inBus);
+  src.start();
+  S.test.bed = src;
+}
+function stopRoomNoise(){
+  if(S.test.bed){ try{ S.test.bed.stop(); }catch(e){} S.test.bed = null; }
 }
 
 /* ============================================================
@@ -1234,8 +1415,11 @@ function hideBanner(){ el.banner.classList.remove("show"); }
 
 function resetAnalysis(){
   S.n = 0; S.disp = 0; S.bpm = 0; S.conf = 0; S.jitter = 0; S.raws.length = 0;
-  S.beat.locked = false; S.beat.scheduled = -1; S.lowSince = 0;
-  S.cL.fill(0); S.cM.fill(0); S.cH.fill(0); S.ons.fill(0);
+  S.prevLag = 0; S.cumW = null; S.cumWP = 0; S.lowSince = 0; S.peak = 0;
+  const b = S.beat;
+  b.locked = false; b.nextFrame = -1; b.predictAt = -1; b.nextTime = 0; b.lastTime = 0;
+  b.pFrames = 0; b.period = 0; b.idx = 0; b.anchor = 0; b.shown = -1; b.clicked = -1;
+  S.ons.fill(0); S.cum.fill(0);
 }
 function resetSession(){
   S.hist.length = 0;
@@ -1284,6 +1468,7 @@ async function start(mode){
       S.test.bpm = clamp(Number(el.testBpm.value)||132, 60, 200);
       S.test.next = S.ctx.currentTime + 0.12;
       S.test.step = 0;
+      startRoomNoise();
       S.monitor.gain.value = 0.5;
       S.mode = "test";
     }
@@ -1315,6 +1500,7 @@ async function start(mode){
 async function stop(){
   S.running = false;
   S.test.on = false;
+  stopRoomNoise();
   if(S.micSrc){ try{ S.micSrc.disconnect(); }catch(e){} S.micSrc = null; }
   if(S.stream){ for(const t of S.stream.getTracks()) t.stop(); S.stream = null; S.track = null; }
   if(S.ctx){ try{ await S.ctx.suspend(); }catch(e){} }
@@ -1358,8 +1544,9 @@ el.btnDown.addEventListener("click", () => {
   if(!b.locked) return;
   // 押した瞬間にいちばん近い拍を1拍目にする
   const now = S.ctx ? S.ctx.currentTime : 0;
-  b.anchor = Math.round((now - b.ref)/b.period);
-  b.scheduled = -1;
+  const half = b.period/2;
+  b.anchor = (now > b.nextTime - half) ? b.idx + 1 : b.idx;
+  b.clicked = -1;
   flashBeat(0);
 });
 el.btnReset.addEventListener("click", resetSession);
@@ -1392,6 +1579,7 @@ el.rMax.addEventListener("change", () => setRange(Number(el.rMin.value), Number(
 
 el.sens.addEventListener("input", () => {
   S.gain = Number(el.sens.value);
+  applyGate();
   el.sensLab.textContent = sensWord(S.gain);
 });
 el.sens.addEventListener("change", saveCfg);
@@ -1414,7 +1602,7 @@ el.btnUseCur.addEventListener("click", () => {
   renderDeviation(); drawGraph(); saveCfg();
 });
 el.optClick.addEventListener("change", () => {
-  S.click = el.optClick.checked; S.beat.scheduled = -1; saveCfg();
+  S.click = el.optClick.checked; S.beat.clicked = -1; saveCfg();
 });
 el.optWake.addEventListener("change", () => {
   S.wake = el.optWake.checked;
@@ -1483,7 +1671,7 @@ el.btnCopy.addEventListener("click", async () => {
 document.addEventListener("visibilitychange", () => {
   if(document.visibilityState === "visible" && S.running && S.ctx){
     S.ctx.resume().catch(()=>{});
-    S.beat.locked = false; S.beat.scheduled = -1;
+    S.beat.locked = false; S.beat.nextFrame = -1; S.beat.predictAt = -1; S.prevLag = 0;
     if(S.wake) requestWake();
   }
 });
