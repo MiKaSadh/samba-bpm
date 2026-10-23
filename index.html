@@ -3,229 +3,218 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#ECF0F1">
+<meta name="theme-color" content="#FFFFFF">
 <meta name="description" content="マイクで拾ったバテリアの音からリアルタイムにテンポを検出する、サンバ練習用BPMカウンター。">
 <title>Bateria BPM</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lato:wght@300;400;700;900&family=Noto+Sans+JP:wght@400;500;700&display=swap"><style>
-/* Flat UI 配色のフラットデザイン。影・グラデーション・大きな角丸は使わない。
-   横画面固定の2カラム：左＝現在のテンポ（ドーナツ）、右＝推移グラフ。 */
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&family=Noto+Sans+JP:wght@400;500;600&display=swap"><style>
+/* Minimal UI Kit の配色。白地にアクア1色、カードは塗らず細い罫線で区切る。
+   影・グラデーション・濃い帯は使わない。横画面固定の2カラム。 */
 :root{
-  --bg:#ECF0F1;        /* clouds */
-  --card:#FFFFFF;
-  --ink:#34495E;       /* wet asphalt */
-  --ink2:#2C3E50;      /* midnight blue */
-  --muted:#7F8C8D;     /* asbestos */
-  --muted2:#95A5A6;    /* concrete */
-  --silver:#BDC3C7;    /* silver */
-  --line:#DCE3E5;
-  --teal:#1ABC9C;      /* turquoise */
-  --teal2:#16A085;     /* green sea */
-  --blue:#3498DB;      /* peter river */
-  --orange:#E67E22;    /* carrot */
-  --orange2:#D35400;   /* pumpkin */
-  --red:#E74C3C;       /* alizarin */
-  --green:#2ECC71;     /* emerald */
-  --f:"Lato", "Noto Sans JP", -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
+  --bg:#FFFFFF;
+  --soft:#F7F8FA;      /* 薄い面（トラック、非選択） */
+  --line:#E2ECF6;      /* 罫線・区切り */
+  --fill:#A3D5EE;      /* 薄いアクア（グラフの面） */
+  --aqua:#5AC2E7;      /* アクセント */
+  --aqua-d:#3FB0D8;
+  --ink:#4F5F6F;       /* 主文字・濃い面 */
+  --muted:#98A5B0;     /* 補助文字 */
+  --fast:#EE8A5F;      /* 走り */
+  --slow:#6FA8C9;      /* 落ち */
+  --f:"Open Sans", "Noto Sans JP", -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
   color-scheme: light;
 }
 *{box-sizing:border-box}
 html,body{margin:0; padding:0; height:100%; overflow:hidden; background:var(--bg)}
 body{
-  color:var(--ink); font-family:var(--f); font-size:13px; line-height:1.5;
+  color:var(--ink); font-family:var(--f); font-size:13px; line-height:1.55;
   -webkit-text-size-adjust:100%; -webkit-tap-highlight-color:transparent;
 }
-button{font-family:inherit; font-size:inherit; color:inherit; cursor:pointer; border:0}
-button:focus-visible, select:focus-visible, input:focus-visible{outline:2px solid var(--teal); outline-offset:1px}
+button{font-family:inherit; font-size:inherit; color:inherit; cursor:pointer; border:0; background:none}
+button:focus-visible, input:focus-visible{outline:2px solid var(--aqua); outline-offset:1px}
+.lab{
+  font-size:10.5px; font-weight:600; letter-spacing:.12em; text-transform:uppercase;
+  color:var(--muted);
+}
 
 /* ---- 画面全体。縦向きの端末では90°回して常に横画面で見せる ---- */
 #app{
   position:absolute; top:0; left:0; transform-origin:0 0;
   display:flex; flex-direction:column; overflow:hidden; background:var(--bg);
   padding-top:max(8px, env(safe-area-inset-top, 0px));
-  padding-right:max(12px, env(safe-area-inset-right, 0px));
+  padding-right:max(14px, env(safe-area-inset-right, 0px));
   padding-bottom:max(8px, env(safe-area-inset-bottom, 0px));
-  padding-left:max(12px, env(safe-area-inset-left, 0px));
+  padding-left:max(14px, env(safe-area-inset-left, 0px));
 }
 #app.rot{
   padding-top:max(8px, env(safe-area-inset-right, 0px));
-  padding-right:max(12px, env(safe-area-inset-bottom, 0px));
+  padding-right:max(14px, env(safe-area-inset-bottom, 0px));
   padding-bottom:max(8px, env(safe-area-inset-left, 0px));
-  padding-left:max(12px, env(safe-area-inset-top, 0px));
+  padding-left:max(14px, env(safe-area-inset-top, 0px));
 }
 
 /* ---- 上段 ---- */
-.bar{display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:10px; flex:none; padding-bottom:8px}
-.bar .side{display:flex; align-items:center; gap:7px; min-width:0}
+.bar{display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:10px; flex:none; padding-bottom:9px}
+.bar .side{display:flex; align-items:center; gap:8px; min-width:0}
 .bar .side.r{justify-content:flex-end}
 .bar h1{
-  font-size:clamp(13px, 2.3vh, 17px); font-weight:900; letter-spacing:.14em;
+  font-size:clamp(12px, 2.1vh, 15px); font-weight:600; letter-spacing:.2em;
   margin:0; white-space:nowrap; color:var(--ink);
 }
 .spacer{flex:1}
-.lamp{width:9px; height:9px; border-radius:50%; background:var(--silver); flex:none}
-.lamp.on{background:var(--teal)}
-.lamp.err{background:var(--red)}
+.lamp{width:8px; height:8px; border-radius:50%; background:var(--line); flex:none}
+.lamp.on{background:var(--aqua)}
+.lamp.err{background:var(--fast)}
 .pill{
-  font-size:11px; font-weight:700; color:var(--muted); background:transparent;
-  border:1px solid var(--silver); border-radius:3px; padding:3px 8px; white-space:nowrap;
+  font-size:11px; color:var(--muted); background:transparent;
+  border:1px solid var(--line); border-radius:3px; padding:3px 9px; white-space:nowrap;
 }
-.iconBtn{background:var(--ink); color:#fff; border-radius:3px; padding:6px 13px; font-size:12px; font-weight:700; white-space:nowrap}
-.iconBtn:active{background:var(--ink2)}
-.iconBtn.alt{background:var(--silver); color:#fff}
-.iconBtn.alt:active{background:var(--muted2)}
+.iconBtn{background:var(--ink); color:#fff; border-radius:3px; padding:6px 14px; font-size:11.5px; font-weight:600; letter-spacing:.04em; white-space:nowrap}
+.iconBtn:active{background:#43515F}
 
-/* ---- カード ---- */
-.card{background:var(--card); border-radius:3px; display:flex; flex-direction:column; min-width:0; overflow:hidden}
-.cardHead{
-  background:var(--ink); color:#fff; flex:none;
-  display:flex; align-items:center; gap:8px; padding:7px 11px;
-  font-size:11.5px; font-weight:700; letter-spacing:.1em;
-}
-.cardHead .r{margin-left:auto; font-weight:400; letter-spacing:0; color:#B6C3CE; font-size:11.5px}
-.cardBody{flex:1; min-height:0; padding:11px; display:flex; flex-direction:column}
+/* ---- カード：塗らず、細い罫線だけ ---- */
+.card{background:var(--bg); border:1px solid var(--line); border-radius:3px; display:flex; flex-direction:column; min-width:0; overflow:hidden}
+.cardHead{display:flex; align-items:center; gap:8px; flex:none; padding:10px 13px 0}
+.cardHead .r{margin-left:auto; text-transform:none; letter-spacing:0; font-weight:400; font-size:11.5px}
+.cardBody{flex:1; min-height:0; padding:10px 13px 13px; display:flex; flex-direction:column}
 
 /* ---- 本体2カラム ---- */
 .main{flex:1; display:flex; gap:12px; min-height:0}
-.main > .card.left{flex:0 0 40%}
+.main > .card.left{flex:0 0 38%}
 .main > .card.right{flex:1}
-.left .cardBody{align-items:center; justify-content:center; gap:7px}
-.right .cardBody{padding:8px 8px 0}
+.left .cardBody{align-items:center; justify-content:center; gap:6px}
+.right .cardBody{padding:6px 10px 0}
 
-/* ---- ドーナツ ---- */
+/* ---- 細いリング ---- */
 .gaugeBox{position:relative; flex:none}
 svg.gauge{position:absolute; inset:0; width:100%; height:100%}
-svg.gauge .trk{fill:none; stroke:var(--silver); stroke-width:11}
-svg.gauge .arc{fill:none; stroke:var(--teal); stroke-width:11}
-svg.gauge .disc{fill:var(--ink)}
+svg.gauge .trk{fill:none; stroke:var(--line); stroke-width:5}
+svg.gauge .arc{fill:none; stroke:var(--aqua); stroke-width:5; stroke-linecap:round}
 .readout{
   position:absolute; inset:0; display:flex; flex-direction:column;
   align-items:center; justify-content:center; text-align:center; pointer-events:none;
 }
-.pulse{width:7px; height:7px; border-radius:50%; background:#4A6075; margin-bottom:5px; flex:none}
-.pulse.hit{background:var(--teal)}
-.pulse.one.hit{background:var(--orange)}
-.bpmLine{display:flex; align-items:baseline; justify-content:center; line-height:.92; color:#fff}
-.bpmInt{font-weight:300}
-.bpmDec{font-weight:300; color:var(--teal); margin-left:.02em}
-.d{display:inline-block; width:.56em; text-align:center}
+.pulse{width:6px; height:6px; border-radius:50%; background:var(--line); margin-bottom:7px; flex:none}
+.pulse.hit{background:var(--aqua)}
+.pulse.one.hit{background:var(--ink)}
+.bpmLine{display:flex; align-items:baseline; justify-content:center; line-height:.95}
+.bpmInt{font-weight:300; color:var(--ink)}
+.bpmDec{font-weight:300; color:var(--aqua); margin-left:.02em}
+.d{display:inline-block; width:.58em; text-align:center}
 .d.dot{width:.28em}
-.unit{font-weight:700; letter-spacing:.22em; color:var(--teal); margin-top:4px}
-.idle .bpmInt, .idle .bpmDec{color:#6E8294}
+.unit{font-weight:600; letter-spacing:.24em; color:var(--muted); margin-top:6px}
+.idle .bpmInt, .idle .bpmDec{color:var(--line)}
 .state{color:var(--muted); font-size:11.5px; min-height:1.3em; text-align:center}
 
 .go{
-  width:100%; background:var(--orange); color:#fff; border-radius:3px;
-  padding:10px; font-size:clamp(13px, 2.2vh, 16px); font-weight:700; letter-spacing:.12em; flex:none;
+  width:100%; background:var(--aqua); color:#fff; border-radius:3px;
+  padding:11px; font-size:clamp(11px, 1.9vh, 13px); font-weight:600; letter-spacing:.2em; flex:none;
 }
-.go:active{background:var(--orange2)}
+.go:active{background:var(--aqua-d)}
 .go.stop{background:var(--ink)}
-.go.stop:active{background:var(--ink2)}
+.go.stop:active{background:#43515F}
 
 /* ---- グラフとタブ ---- */
 canvas#graph{flex:1; width:100%; min-height:0; display:block}
-.tabs{display:flex; flex:none; border-top:1px solid var(--line); margin:0 -8px}
+.tabs{display:flex; flex:none; gap:0; border-top:1px solid var(--line); margin:6px -10px 0}
 .tabs button{
-  flex:1; background:transparent; color:var(--muted2); font-size:11.5px; font-weight:700;
-  padding:8px 2px; border-top:2px solid transparent; margin-top:-1px;
+  flex:1; color:var(--muted); font-size:11px; font-weight:600; padding:8px 2px;
+  border-right:1px solid var(--line);
 }
-.tabs button[aria-pressed="true"]{color:var(--teal); border-top-color:var(--teal)}
+.tabs button:last-child{border-right:0}
+.tabs button[aria-pressed="true"]{background:var(--aqua); color:#fff}
 
 /* ---- 警告バナー ---- */
 .banner{
   display:none; gap:9px; align-items:flex-start; position:absolute;
-  left:14px; right:14px; top:40px; z-index:40;
-  background:var(--red); border-radius:3px; padding:10px 13px; font-size:12.5px; color:#fff;
+  left:16px; right:16px; top:42px; z-index:40;
+  background:var(--ink); border-radius:3px; padding:11px 14px; font-size:12.5px; color:#fff;
 }
 .banner.show{display:flex}
-.banner b{font-weight:700}
+.banner b{font-weight:600}
 
 /* ---- 詳細ページ ---- */
 .more{
   position:absolute; inset:0; z-index:50; background:var(--bg);
   overflow-y:auto; -webkit-overflow-scrolling:touch;
   padding-top:max(8px, env(safe-area-inset-top, 0px));
-  padding-right:max(12px, env(safe-area-inset-right, 0px));
-  padding-bottom:max(18px, env(safe-area-inset-bottom, 0px));
-  padding-left:max(12px, env(safe-area-inset-left, 0px));
+  padding-right:max(14px, env(safe-area-inset-right, 0px));
+  padding-bottom:max(20px, env(safe-area-inset-bottom, 0px));
+  padding-left:max(14px, env(safe-area-inset-left, 0px));
 }
 #app.rot .more{
   padding-top:max(8px, env(safe-area-inset-right, 0px));
-  padding-right:max(12px, env(safe-area-inset-bottom, 0px));
-  padding-bottom:max(18px, env(safe-area-inset-left, 0px));
-  padding-left:max(12px, env(safe-area-inset-top, 0px));
+  padding-right:max(14px, env(safe-area-inset-bottom, 0px));
+  padding-bottom:max(20px, env(safe-area-inset-left, 0px));
+  padding-left:max(14px, env(safe-area-inset-top, 0px));
 }
 .moreHead{
-  display:flex; align-items:center; gap:10px; position:sticky; top:0; z-index:2;
-  background:var(--bg); padding:2px 0 9px;
+  display:flex; align-items:center; gap:12px; position:sticky; top:0; z-index:2;
+  background:var(--bg); padding:2px 0 10px;
 }
-.moreHead h2{font-size:14px; font-weight:900; letter-spacing:.12em; margin:0}
+.moreHead h2{font-size:12px; font-weight:600; letter-spacing:.2em; margin:0; text-transform:uppercase; color:var(--muted)}
 .cols{display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:10px; align-items:start}
 .cols .card{display:block}
-.cols .cardBody{display:block; padding:11px}
+.cols .cardBody{display:block}
 
 /* 入力レベル */
 .levels{display:flex; gap:8px; align-items:center}
-.levels .lab{font-size:10.5px; color:var(--muted2); width:1.6em; flex:none; text-align:right}
-.bar2{height:8px; border-radius:2px; background:var(--bg); overflow:hidden; flex:1; min-width:0}
-.bar2 i{display:block; height:100%; width:0%; transition:width .07s linear}
-#lvL i{background:var(--teal)}
-#lvM i{background:var(--blue)}
-#lvH i{background:var(--orange)}
+.levels .n{font-size:10.5px; color:var(--muted); width:1.6em; flex:none; text-align:right}
+.bar2{height:6px; border-radius:3px; background:var(--soft); overflow:hidden; flex:1; min-width:0}
+.bar2 i{display:block; height:100%; background:var(--aqua); width:0%; transition:width .07s linear}
 
 /* 拍カウント */
 .beats{display:flex; gap:8px; align-items:center}
-.beats .dot{width:12px; height:12px; border-radius:50%; background:var(--bg); border:1px solid var(--silver); transition:background .05s}
-.beats .dot.hit{background:var(--teal); border-color:var(--teal)}
-.beats .dot.one{width:15px; height:15px}
-.beats .dot.one.hit{background:var(--orange); border-color:var(--orange)}
+.beats .dot{width:11px; height:11px; border-radius:50%; background:var(--line); transition:background .05s}
+.beats .dot.hit{background:var(--aqua)}
+.beats .dot.one{width:14px; height:14px}
+.beats .dot.one.hit{background:var(--ink)}
 
 /* ズレ計 */
-.devHead{display:flex; align-items:baseline; gap:10px; margin-bottom:9px}
-.devNum{font-size:28px; font-weight:300; line-height:1}
+.devHead{display:flex; align-items:baseline; gap:10px; margin-bottom:10px}
+.devNum{font-size:30px; font-weight:300; line-height:1}
 .devWord{font-size:12.5px; color:var(--muted)}
-.devTrack{position:relative; height:30px; border-radius:2px; background:var(--bg); overflow:hidden}
-.devTrack .zone{position:absolute; top:0; bottom:0; background:rgba(46,204,113,.25)}
-.devTrack .mid{position:absolute; top:0; bottom:0; left:50%; width:2px; margin-left:-1px; background:var(--orange)}
-.devTrack .needle{position:absolute; top:3px; bottom:3px; width:4px; margin-left:-2px; left:50%; background:var(--ink); transition:left .08s linear, background .15s}
-.devScale{display:flex; justify-content:space-between; font-size:10.5px; color:var(--muted2); margin-top:4px}
-.tgtRow{display:flex; align-items:center; gap:8px; margin-top:10px; flex-wrap:wrap}
+.devTrack{position:relative; height:26px; border-radius:3px; background:var(--soft); overflow:hidden}
+.devTrack .zone{position:absolute; top:0; bottom:0; background:rgba(90,194,231,.22)}
+.devTrack .mid{position:absolute; top:0; bottom:0; left:50%; width:1px; margin-left:-.5px; background:var(--muted)}
+.devTrack .needle{position:absolute; top:3px; bottom:3px; width:3px; margin-left:-1.5px; left:50%; background:var(--ink); border-radius:2px; transition:left .08s linear, background .15s}
+.devScale{display:flex; justify-content:space-between; font-size:10.5px; color:var(--muted); margin-top:5px}
+.tgtRow{display:flex; align-items:center; gap:8px; margin-top:12px; flex-wrap:wrap}
 .tgtRow label{font-size:12px; color:var(--muted)}
 input[type=number]{
-  background:#fff; color:var(--ink); border:1px solid var(--silver); border-radius:3px;
-  padding:6px 8px; font-size:14px; font-family:inherit; width:5.4em;
+  background:#fff; color:var(--ink); border:1px solid var(--line); border-radius:3px;
+  padding:7px 9px; font-size:14px; font-family:inherit; width:5.4em;
 }
-input[type=range]{accent-color:var(--teal); width:100%}
+input[type=range]{accent-color:var(--aqua); width:100%}
 
-canvas#scope{display:block; width:100%; height:54px; background:var(--bg); border-radius:2px}
+canvas#scope{display:block; width:100%; height:52px; background:var(--soft); border-radius:3px}
 
-/* 統計 */
-.stats{display:grid; grid-template-columns:repeat(auto-fit, minmax(62px,1fr)); gap:8px}
-.stat{min-width:0; background:var(--bg); border-radius:2px; padding:7px 8px}
-.stat .k{font-size:10px; color:var(--muted2); font-weight:700; letter-spacing:.04em}
-.stat .v{font-size:19px; font-weight:300; line-height:1.25}
+/* 統計：数字が上、ラベルが下 */
+.stats{display:grid; grid-template-columns:repeat(auto-fit, minmax(64px,1fr)); gap:12px 10px}
+.stat{min-width:0}
+.stat .v{font-size:21px; font-weight:600; line-height:1.15; color:var(--ink)}
+.stat .k{font-size:10.5px; color:var(--muted); margin-top:1px}
 
 /* 設定行 */
-.row{display:flex; align-items:center; gap:9px; padding:9px 0; border-top:1px solid var(--line); flex-wrap:wrap}
-.row:first-child{border-top:0; padding-top:0}
+.row{display:flex; align-items:center; gap:9px; padding:10px 0; border-top:1px solid var(--line); flex-wrap:wrap}
+.row:first-child{border-top:0; padding-top:2px}
 .row > .k{font-size:12.5px; color:var(--muted); flex:none; min-width:6.2em}
 .row > .c{flex:1; min-width:150px; display:flex; align-items:center; gap:8px; flex-wrap:wrap}
-.row .hint{font-size:11.5px; color:var(--muted2); flex-basis:100%; line-height:1.6}
-.seg{display:flex; border-radius:3px; overflow:hidden; border:1px solid var(--silver)}
-.seg button{background:#fff; padding:6px 11px; font-size:12.5px; font-weight:700; color:var(--muted); border-right:1px solid var(--silver)}
+.row .hint{font-size:11.5px; color:var(--muted); flex-basis:100%; line-height:1.65}
+.seg{display:flex; border-radius:3px; overflow:hidden; border:1px solid var(--line)}
+.seg button{background:#fff; padding:7px 12px; font-size:12.5px; color:var(--muted); border-right:1px solid var(--line)}
 .seg button:last-child{border-right:0}
-.seg button[aria-pressed="true"]{background:var(--teal); color:#fff}
+.seg button[aria-pressed="true"]{background:var(--aqua); color:#fff}
 .sw{display:inline-flex; align-items:center; gap:7px; font-size:12.5px; color:var(--muted)}
-.sw input{width:17px; height:17px; accent-color:var(--teal)}
-.btn{background:var(--bg); color:var(--muted); border:1px solid var(--silver); border-radius:3px; padding:6px 11px; font-size:12.5px; font-weight:700}
-.btn:active{background:var(--silver); color:#fff}
-.btn.on{background:var(--teal); border-color:var(--teal); color:#fff}
-.btn.teal{background:var(--teal); border-color:var(--teal); color:#fff}
-.tips{font-size:12.5px; color:var(--muted); line-height:1.75}
+.sw input{width:17px; height:17px; accent-color:var(--aqua)}
+.btn{background:#fff; color:var(--muted); border:1px solid var(--line); border-radius:3px; padding:7px 12px; font-size:12.5px}
+.btn:active{background:var(--soft)}
+.btn.on, .btn.aqua{background:var(--aqua); border-color:var(--aqua); color:#fff}
+.tips{font-size:12.5px; color:var(--muted); line-height:1.8}
 .tips ul{margin:0; padding-left:1.2em}
-.tips li{margin-bottom:6px}
-.tips b{color:var(--ink); font-weight:700}
+.tips li{margin-bottom:7px}
+.tips b{color:var(--ink); font-weight:600}
 @media (prefers-reduced-motion: reduce){ *{transition-duration:.01ms !important} }
 </style>
 </head>
@@ -247,14 +236,13 @@ canvas#scope{display:block; width:100%; height:54px; background:var(--bg); borde
   <div class="main" id="viewMain">
 
     <div class="card left">
-      <div class="cardHead">テンポ</div>
+      <div class="cardHead"><span class="lab">テンポ</span></div>
       <div class="cardBody">
         <div class="gaugeBox idle" id="gaugeBox">
           <svg class="gauge" viewBox="0 0 200 200" aria-hidden="true">
-            <circle class="trk" cx="100" cy="100" r="86"></circle>
-            <circle class="arc" cx="100" cy="100" r="86" pathLength="1" id="phaseArc"
+            <circle class="trk" cx="100" cy="100" r="92"></circle>
+            <circle class="arc" cx="100" cy="100" r="92" pathLength="1" id="phaseArc"
                     transform="rotate(-90 100 100)" stroke-dasharray="0 1"></circle>
-            <circle class="disc" cx="100" cy="100" r="71"></circle>
           </svg>
           <div class="readout">
             <span class="pulse" id="pulse"></span>
@@ -265,12 +253,12 @@ canvas#scope{display:block; width:100%; height:54px; background:var(--bg); borde
           </div>
         </div>
         <div class="state" id="stateMsg">マイクを許可して開始</div>
-        <button class="go" id="btnGo" type="button">開始</button>
+        <button class="go" id="btnGo" type="button">START</button>
       </div>
     </div>
 
     <div class="card right">
-      <div class="cardHead">推移<span class="r" id="devInline"></span></div>
+      <div class="cardHead"><span class="lab">推移</span><span class="r lab" id="devInline"></span></div>
       <div class="cardBody">
         <canvas id="graph"></canvas>
         <div class="tabs" id="spanTabs">
@@ -296,22 +284,22 @@ canvas#scope{display:block; width:100%; height:54px; background:var(--bg); borde
     <div class="cols">
 
       <div class="card">
-        <div class="cardHead">入力と拍<span class="r"><button class="btn" id="btnDown" type="button" style="padding:3px 9px">頭合わせ</button></span></div>
+        <div class="cardHead"><span class="lab">入力と拍</span><span class="r"><button class="btn" id="btnDown" type="button" style="padding:4px 10px">頭合わせ</button></span></div>
         <div class="cardBody">
           <div class="levels">
-            <span class="lab">低</span><span class="bar2" id="lvL"><i></i></span>
-            <span class="lab">中</span><span class="bar2" id="lvM"><i></i></span>
-            <span class="lab">高</span><span class="bar2" id="lvH"><i></i></span>
+            <span class="n">低</span><span class="bar2" id="lvL"><i></i></span>
+            <span class="n">中</span><span class="bar2" id="lvM"><i></i></span>
+            <span class="n">高</span><span class="bar2" id="lvH"><i></i></span>
           </div>
-          <div class="beats" id="beats" style="margin-top:11px">
+          <div class="beats" id="beats" style="margin-top:12px">
             <span class="dot one"></span><span class="dot"></span>
           </div>
-          <canvas id="scope" style="margin-top:11px"></canvas>
+          <canvas id="scope" style="margin-top:12px"></canvas>
         </div>
       </div>
 
       <div class="card">
-        <div class="cardHead">目標とのズレ<span class="r" id="tolLabel">許容 ±1.5</span></div>
+        <div class="cardHead"><span class="lab">目標とのズレ</span><span class="r lab" id="tolLabel">許容 ±1.5</span></div>
         <div class="cardBody">
           <div class="devHead">
             <span class="devNum" id="devNum">--</span>
@@ -333,24 +321,24 @@ canvas#scope{display:block; width:100%; height:54px; background:var(--bg); borde
       </div>
 
       <div class="card">
-        <div class="cardHead">セッション<span class="r"><button class="btn" id="btnReset" type="button" style="padding:3px 9px">リセット</button></span></div>
+        <div class="cardHead"><span class="lab">セッション</span><span class="r"><button class="btn" id="btnReset" type="button" style="padding:4px 10px">リセット</button></span></div>
         <div class="cardBody">
           <div class="stats">
-            <div class="stat"><div class="k">経過</div><div class="v" id="stTime">0:00</div></div>
-            <div class="stat"><div class="k">平均</div><div class="v" id="stAvg">--</div></div>
-            <div class="stat"><div class="k">最小</div><div class="v" id="stMin">--</div></div>
-            <div class="stat"><div class="k">最大</div><div class="v" id="stMax">--</div></div>
-            <div class="stat"><div class="k">開始→現在</div><div class="v" id="stDrift">--</div></div>
+            <div class="stat"><div class="v" id="stTime">0:00</div><div class="k">経過</div></div>
+            <div class="stat"><div class="v" id="stAvg">--</div><div class="k">平均</div></div>
+            <div class="stat"><div class="v" id="stMin">--</div><div class="k">最小</div></div>
+            <div class="stat"><div class="v" id="stMax">--</div><div class="k">最大</div></div>
+            <div class="stat"><div class="v" id="stDrift">--</div><div class="k">開始→現在</div></div>
           </div>
           <div class="tgtRow">
-            <button class="btn teal" id="btnCopy" type="button">結果をコピー</button>
-            <span id="copyMsg" style="font-size:11.5px;color:var(--muted2)"></span>
+            <button class="btn aqua" id="btnCopy" type="button">結果をコピー</button>
+            <span id="copyMsg" style="font-size:11.5px;color:var(--muted)"></span>
           </div>
         </div>
       </div>
 
       <div class="card">
-        <div class="cardHead">設定</div>
+        <div class="cardHead"><span class="lab">設定</span></div>
         <div class="cardBody">
 
           <div class="row">
@@ -371,7 +359,7 @@ canvas#scope{display:block; width:100%; height:54px; background:var(--bg); borde
             <span class="k">範囲を手動</span>
             <div class="c">
               <input type="number" id="rMin" min="40" max="240" step="1" inputmode="numeric">
-              <span style="color:var(--muted2)">〜</span>
+              <span style="color:var(--muted)">〜</span>
               <input type="number" id="rMax" min="50" max="300" step="1" inputmode="numeric">
             </div>
           </div>
@@ -434,7 +422,7 @@ canvas#scope{display:block; width:100%; height:54px; background:var(--bg); borde
             <span class="k">動作確認</span>
             <div class="c">
               <input type="number" id="testBpm" min="60" max="200" step="1" value="132" inputmode="numeric">
-              <button class="btn teal" id="btnTest" type="button">自己テスト</button>
+              <button class="btn aqua" id="btnTest" type="button">自己テスト</button>
               <span class="hint">マイクを使わず、内蔵のサンバ風パターン（スルド＋カイシャ16分＋タンボリン）を鳴らして検出を確認します。練習前のチェック用。</span>
             </div>
           </div>
@@ -442,7 +430,7 @@ canvas#scope{display:block; width:100%; height:54px; background:var(--bg); borde
       </div>
 
       <div class="card">
-        <div class="cardHead">使い方とコツ</div>
+        <div class="cardHead"><span class="lab">使い方とコツ</span></div>
         <div class="cardBody">
           <div class="tips">
             <ul>
@@ -1113,21 +1101,21 @@ function renderTarget(){
 function renderDeviation(){
   if(S.target == null || !S.disp){
     el.devNum.textContent = "--";
-    el.devNum.style.color = "var(--muted2)";
+    el.devNum.style.color = "var(--muted)";
     el.devWord.textContent = S.target == null ? "目標BPMを決めると判定します" : "検出待ち";
     el.devNeedle.style.left = "50%";
-    el.devNeedle.style.background = "var(--silver)";
+    el.devNeedle.style.background = "var(--line)";
     el.devInline.textContent = S.target == null ? "" : ("目標 " + fmt1(S.target));
-    el.devInline.style.color = "#B6C3CE";
+    el.devInline.style.color = "var(--muted)";
     return;
   }
   const d = S.disp - S.target;
   const sign = d > 0 ? "+" : (d < 0 ? "−" : "±");
   el.devNum.textContent = sign + fmt1(Math.abs(d));
   let col, word;
-  if(Math.abs(d) <= S.tol){ col = "var(--green)"; word = "ジャスト"; }
-  else if(d > 0){ col = "var(--red)"; word = Math.abs(d) > S.tol*3 ? "かなり走っています" : "走り気味"; }
-  else{ col = "var(--blue)"; word = Math.abs(d) > S.tol*3 ? "かなり落ちています" : "落ち気味"; }
+  if(Math.abs(d) <= S.tol){ col = "var(--aqua)"; word = "ジャスト"; }
+  else if(d > 0){ col = "var(--fast)"; word = Math.abs(d) > S.tol*3 ? "かなり走っています" : "走り気味"; }
+  else{ col = "var(--slow)"; word = Math.abs(d) > S.tol*3 ? "かなり落ちています" : "落ち気味"; }
   el.devNum.style.color = col;
   el.devWord.textContent = word;
   el.devNeedle.style.left = clamp(50 + d/8*50, 1, 99) + "%";
@@ -1151,7 +1139,7 @@ function renderStats(){
     el.stMax.textContent = fmt1(st.max);
     const dr = S.disp - st.first;
     el.stDrift.textContent = (Math.abs(dr) < 0.05 ? "±" : (dr>0 ? "+" : "−")) + fmt1(Math.abs(dr));
-    el.stDrift.style.color = Math.abs(dr) < 1.5 ? "var(--green)" : (dr>0 ? "var(--red)" : "var(--blue)");
+    el.stDrift.style.color = Math.abs(dr) < 1.5 ? "var(--aqua)" : (dr>0 ? "var(--fast)" : "var(--slow)");
   }else{
     el.stAvg.textContent = el.stMin.textContent = el.stMax.textContent = el.stDrift.textContent = "--";
   }
@@ -1206,30 +1194,30 @@ function drawGraph(){
   g.textBaseline = "middle";
   for(let v=lo; v<=hi+1e-6; v+=step){
     const y = Y(v);
-    g.strokeStyle = "rgba(52,73,94,.10)"; g.lineWidth = 1;
+    g.strokeStyle = "#F2F5F8"; g.lineWidth = 1;
     g.beginPath(); g.moveTo(34, y); g.lineTo(w-6, y); g.stroke();
-    g.fillStyle = "#95A5A6"; g.textAlign = "right";
+    g.fillStyle = "#98A5B0"; g.textAlign = "right";
     g.fillText(v.toFixed(dec), 30, y);
   }
 
   // 許容帯と目標線
   if(S.target != null){
     const y1 = Y(S.target+S.tol), y2 = Y(S.target-S.tol);
-    g.fillStyle = "rgba(46,204,113,.18)";
+    g.fillStyle = "#F7F8FA";
     g.fillRect(34, Math.min(y1,y2), w-40, Math.abs(y2-y1));
-    g.strokeStyle = "#E67E22"; g.lineWidth = 1.5; g.setLineDash([5,4]);
+    g.strokeStyle = "#B9C4CE"; g.lineWidth = 1; g.setLineDash([4,4]);
     g.beginPath(); g.moveTo(34, Y(S.target)); g.lineTo(w-6, Y(S.target)); g.stroke();
     g.setLineDash([]);
   }
 
   if(pts.length < 2){
-    g.fillStyle = "#BDC3C7"; g.textAlign = "center";
+    g.fillStyle = "#C3CCD4"; g.textAlign = "center";
     g.fillText(S.running ? "計測中…" : "開始すると推移が出ます", (w+28)/2, h/2);
     return;
   }
 
   // 折れ線（時間の飛びで区切る）
-  g.lineWidth = 2; g.lineJoin = "round"; g.strokeStyle = "#1ABC9C";
+  g.lineWidth = 1.8; g.lineJoin = "round"; g.strokeStyle = "#5AC2E7";
   g.beginPath();
   let pen = false;
   for(let i=0;i<pts.length;i++){
@@ -1240,10 +1228,24 @@ function drawGraph(){
   }
   g.stroke();
 
-  // 直近の点
+  // 直近の点と現在値のチップ
   const last = pts[pts.length-1];
-  g.fillStyle = "#fff"; g.strokeStyle = "#1ABC9C"; g.lineWidth = 2.5;
-  g.beginPath(); g.arc(X(last.t), Y(last.bpm), 3.6, 0, Math.PI*2); g.fill(); g.stroke();
+  const lx = X(last.t), ly = Y(last.bpm);
+  const txt = fmt1(last.bpm);
+  g.font = "600 10px " + getComputedStyle(document.body).fontFamily;
+  const tw = g.measureText(txt).width + 12;
+  let cx = lx - tw/2, cy = ly - 22;
+  if(cx + tw > w-4) cx = w-4-tw;
+  if(cx < 34) cx = 34;
+  if(cy < 2) cy = ly + 10;
+  g.fillStyle = "#4F5F6F";
+  g.beginPath();
+  if(g.roundRect) g.roundRect(cx, cy, tw, 16, 2); else g.rect(cx, cy, tw, 16);
+  g.fill();
+  g.fillStyle = "#fff"; g.textAlign = "center"; g.textBaseline = "middle";
+  g.fillText(txt, cx + tw/2, cy + 8.5);
+  g.fillStyle = "#fff"; g.strokeStyle = "#5AC2E7"; g.lineWidth = 2;
+  g.beginPath(); g.arc(lx, ly, 3.2, 0, Math.PI*2); g.fill(); g.stroke();
 }
 
 function drawScope(){
@@ -1253,7 +1255,7 @@ function drawScope(){
   const SEC = 4;
   const N = Math.min(S.n, Math.round(SEC*fs), RING-4);
   if(N < 8){
-    g.fillStyle = "#BDC3C7"; g.font = "10px ui-sans-serif, system-ui, sans-serif";
+    g.fillStyle = "#C3CCD4"; g.font = "10px ui-sans-serif, system-ui, sans-serif";
     g.textAlign = "center"; g.textBaseline = "middle";
     g.fillText("オンセット波形（直近4秒）", w/2, h/2);
     return;
@@ -1262,7 +1264,7 @@ function drawScope(){
   let mx = 1e-6;
   for(let i=0;i<N;i++){ const v = S.ons[(base+i)&(RING-1)]; if(v>mx) mx=v; }
   const cols = Math.min(w, 320), per = N/cols;
-  g.fillStyle = "#1ABC9C";
+  g.fillStyle = "#5AC2E7";
   for(let c=0;c<cols;c++){
     let v = 0;
     const s = Math.floor(c*per), e2 = Math.min(N, Math.floor((c+1)*per));
@@ -1274,7 +1276,7 @@ function drawScope(){
   const b = S.beat;
   if(b.locked && b.period > 0.1 && b.nextTime > 0){
     const tStart = S.tAt[base & (RING-1)], tEnd = S.tAt[(S.n-1)&(RING-1)];
-    g.strokeStyle = "#E67E22"; g.lineWidth = 1.5;
+    g.strokeStyle = "rgba(79,95,111,.45)"; g.lineWidth = 1;
     for(let i=0;i<64;i++){
       const t = b.nextTime - i*b.period;
       if(t < tStart) break;
@@ -1551,7 +1553,7 @@ async function start(mode){
     resetSession();
     S.running = true;
     el.lamp.classList.remove("err"); el.lamp.classList.add("on");
-    el.btnGo.textContent = "停止";
+    el.btnGo.textContent = "STOP";
     el.btnGo.classList.add("stop");
     el.btnTest.textContent = (mode === "test") ? "テスト停止" : "自己テスト";
     el.stateMsg.textContent = (mode === "test")
@@ -1580,7 +1582,7 @@ async function stop(){
   if(S.ctx){ try{ await S.ctx.suspend(); }catch(e){} }
   S.mode = "idle";
   el.lamp.classList.remove("on");
-  el.btnGo.textContent = "開始";
+  el.btnGo.textContent = "START";
   el.btnGo.classList.remove("stop");
   el.btnTest.textContent = "自己テスト";
   el.phaseArc.setAttribute("stroke-dasharray", "0 1");
