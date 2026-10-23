@@ -1,0 +1,1517 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#13101b">
+<meta name="description" content="マイクで拾ったバテリアの音からリアルタイムにテンポを検出する、サンバ練習用BPMカウンター。">
+<title>Bateria BPM</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Anton&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap">
+<style>
+/* 計器パネル型レイアウト: 上=状態 / 中央=巨大BPMと拍ゲージ / 下=ズレ計・推移グラフ・統計、操作は下端固定バー */
+:root{
+  --bg:#13101b; --bg2:#1a1526; --surface:#221b31; --surface2:#2c2340;
+  --line:#372c4c; --line2:#4a3b66;
+  --fg:#f6f0f9; --dim:#a79cba; --faint:#6e6484;
+  --accent:#ff2e74;      /* パルス・主役 */
+  --gold:#ffc24a;        /* 目標値 */
+  --ok:#36d99b;          /* ジャスト */
+  --fast:#ff8a3d;        /* 走り */
+  --slow:#49c0ff;        /* 落ち */
+  --shadow:0 10px 30px rgba(0,0,0,.45);
+  --f-disp:"Anton", "Arial Narrow", Impact, sans-serif;
+  --f-body:"Zen Kaku Gothic New", -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  color-scheme: dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:
+    radial-gradient(1100px 620px at 50% -14%, #2a1b3d 0%, rgba(42,27,61,0) 62%),
+    var(--bg);
+  color:var(--fg);
+  font-family:var(--f-body);
+  font-size:15px; line-height:1.55;
+  -webkit-text-size-adjust:100%;
+  -webkit-tap-highlight-color:transparent;
+  padding-bottom:calc(84px + env(safe-area-inset-bottom, 0px));
+  min-height:100%;
+}
+.wrap{
+  max-width:560px; margin:0 auto;
+  padding-left:max(16px, env(safe-area-inset-left, 0px));
+  padding-right:max(16px, env(safe-area-inset-right, 0px));
+  padding-block:calc(10px + env(safe-area-inset-top, 0px)) 18px;
+}
+button{font-family:inherit; font-size:inherit; color:inherit; cursor:pointer}
+button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible{
+  outline:2px solid var(--accent); outline-offset:2px
+}
+.eyebrow{
+  font-family:var(--f-disp); letter-spacing:.14em; text-transform:uppercase;
+  font-size:12px; color:var(--faint);
+}
+
+/* ---- ヘッダ ---- */
+header{display:flex; align-items:center; gap:10px; margin-bottom:10px}
+.brand{display:flex; align-items:baseline; gap:8px; min-width:0}
+.brand h1{
+  font-family:var(--f-disp); font-weight:400; font-size:21px; letter-spacing:.055em;
+  margin:0; white-space:nowrap;
+}
+.brand .sub{font-size:11px; color:var(--faint); white-space:nowrap}
+.spacer{flex:1}
+.pill{
+  font-size:11.5px; color:var(--dim); background:var(--surface);
+  border:1px solid var(--line); border-radius:999px; padding:3px 10px; white-space:nowrap;
+}
+.lamp{width:8px; height:8px; border-radius:50%; background:var(--faint); flex:none}
+.lamp.on{background:var(--ok); box-shadow:0 0 8px var(--ok)}
+.lamp.err{background:var(--fast); box-shadow:0 0 8px var(--fast)}
+
+/* ---- 警告バナー ---- */
+.banner{
+  display:none; gap:10px; align-items:flex-start;
+  background:#3a1724; border:1px solid #6d2740; border-radius:12px;
+  padding:11px 13px; margin-bottom:12px; font-size:13px; color:#ffd9e2;
+}
+.banner.show{display:flex}
+.banner b{color:#fff}
+
+/* ---- メーター（入力レベル） ---- */
+.levels{display:flex; gap:7px; align-items:center; margin-bottom:12px}
+.levels .lab{font-size:10.5px; color:var(--faint); width:1.6em; flex:none; text-align:right}
+.bar{height:6px; border-radius:3px; background:var(--surface); overflow:hidden; flex:1; min-width:0}
+.bar i{display:block; height:100%; width:0%; border-radius:3px; transition:width .07s linear}
+#lvL i{background:linear-gradient(90deg,#ff2e74,#ff6ca0)}
+#lvM i{background:linear-gradient(90deg,#9a6bff,#c4a3ff)}
+#lvH i{background:linear-gradient(90deg,#49c0ff,#9ae1ff)}
+
+/* ---- 中央ゲージ ---- */
+.stage{position:relative; display:grid; place-items:center; margin:2px 0 6px}
+.gaugeBox{position:relative; width:min(78vw, 290px); aspect-ratio:1/1; max-width:100%}
+.glow{
+  position:absolute; inset:9%; border-radius:50%;
+  background:radial-gradient(circle, rgba(255,46,116,.55) 0%, rgba(255,46,116,0) 68%);
+  opacity:0; pointer-events:none;
+}
+svg.gauge{position:absolute; inset:0; width:100%; height:100%; overflow:visible}
+svg.gauge .trk{fill:none; stroke:var(--surface2); stroke-width:7}
+svg.gauge .conf{fill:none; stroke:var(--line2); stroke-width:3}
+svg.gauge .arc{
+  fill:none; stroke:var(--accent); stroke-width:7; stroke-linecap:round;
+  filter:drop-shadow(0 0 6px rgba(255,46,116,.55));
+}
+.readout{
+  position:absolute; inset:0; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; text-align:center; pointer-events:none;
+}
+.bpmLine{display:flex; align-items:baseline; justify-content:center}
+.bpmInt{
+  font-family:var(--f-disp); font-weight:400; line-height:.86;
+  font-size:min(27vw, 100px); letter-spacing:.005em;
+}
+.bpmDec{
+  font-family:var(--f-disp); line-height:.9;
+  font-size:min(11vw, 40px); color:var(--accent); margin-left:.04em;
+}
+.d{display:inline-block; width:.56em; text-align:center}
+.d.dot{width:.26em}
+.unit{font-family:var(--f-disp); font-size:13px; letter-spacing:.2em; color:var(--faint); margin-top:7px}
+.state{font-size:11.5px; color:var(--dim); margin-top:3px; min-height:1.3em}
+.idle .bpmInt,.idle .bpmDec{color:var(--faint)}
+
+/* ---- 拍カウント ---- */
+.beats{display:flex; gap:9px; justify-content:center; margin:4px 0 14px; align-items:center}
+.beats .dot{
+  width:11px; height:11px; border-radius:50%; background:var(--surface2);
+  border:1px solid var(--line); transition:background .05s, transform .05s;
+}
+.beats .dot.hit{background:var(--accent); border-color:var(--accent); transform:scale(1.45)}
+.beats .dot.one{width:14px; height:14px}
+.beats .dot.one.hit{background:var(--gold); border-color:var(--gold)}
+.btnMini{
+  background:var(--surface); border:1px solid var(--line); border-radius:999px;
+  padding:3px 11px; font-size:11.5px; color:var(--dim); margin-left:6px;
+}
+
+/* ---- カード ---- */
+.card{
+  background:linear-gradient(180deg, var(--surface) 0%, var(--bg2) 100%);
+  border:1px solid var(--line); border-radius:16px; padding:14px;
+  margin-bottom:12px; box-shadow:var(--shadow);
+}
+.card > h2{
+  font-family:var(--f-disp); font-weight:400; font-size:12px; letter-spacing:.14em;
+  text-transform:uppercase; color:var(--faint); margin:0 0 10px;
+  display:flex; align-items:center; gap:8px;
+}
+.card > h2 .r{margin-left:auto; font-family:var(--f-body); letter-spacing:0; text-transform:none; font-size:12px; color:var(--dim)}
+
+/* ---- ズレ計 ---- */
+.devHead{display:flex; align-items:baseline; gap:10px; margin-bottom:9px}
+.devNum{font-family:var(--f-disp); font-size:30px; line-height:1}
+.devWord{font-size:13px; color:var(--dim)}
+.devTrack{
+  position:relative; height:34px; border-radius:10px; background:var(--bg);
+  border:1px solid var(--line); overflow:hidden;
+}
+.devTrack .zone{position:absolute; top:0; bottom:0; background:rgba(54,217,155,.16); border-left:1px solid rgba(54,217,155,.35); border-right:1px solid rgba(54,217,155,.35)}
+.devTrack .mid{position:absolute; top:4px; bottom:4px; left:50%; width:2px; margin-left:-1px; background:var(--gold); border-radius:1px}
+.devTrack .needle{
+  position:absolute; top:3px; bottom:3px; width:5px; margin-left:-2.5px; left:50%;
+  background:var(--fg); border-radius:3px; box-shadow:0 0 10px rgba(0,0,0,.6);
+  transition:left .08s linear, background .15s;
+}
+.devScale{display:flex; justify-content:space-between; font-size:10.5px; color:var(--faint); margin-top:5px}
+.tgtRow{display:flex; align-items:center; gap:9px; margin-top:11px; flex-wrap:wrap}
+.tgtRow label{font-size:12px; color:var(--dim)}
+input[type=number], select{
+  background:var(--bg); color:var(--fg); border:1px solid var(--line2);
+  border-radius:9px; padding:7px 9px; font-size:14px; font-family:inherit;
+}
+input[type=number]{width:5.4em; font-variant-numeric:tabular-nums}
+input[type=range]{accent-color:var(--accent); width:100%}
+
+/* ---- グラフ ---- */
+canvas{display:block; width:100%; border-radius:10px}
+#graph{height:132px; background:var(--bg)}
+#scope{height:54px; background:var(--bg); margin-top:9px}
+
+/* ---- 統計 ---- */
+.stats{display:grid; grid-template-columns:repeat(auto-fit, minmax(72px,1fr)); gap:10px}
+.stat{min-width:0}
+.stat .k{font-size:10.5px; color:var(--faint); letter-spacing:.04em}
+.stat .v{font-family:var(--f-disp); font-size:21px; line-height:1.18; font-variant-numeric:tabular-nums}
+.stat .v small{font-family:var(--f-body); font-size:11px; color:var(--faint); margin-left:2px}
+
+/* ---- 設定 ---- */
+details{
+  background:var(--surface); border:1px solid var(--line); border-radius:16px;
+  padding:0 14px; margin-bottom:12px;
+}
+details[open]{padding-bottom:14px}
+summary{
+  list-style:none; cursor:pointer; padding:13px 0;
+  font-family:var(--f-disp); font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:var(--dim);
+  display:flex; align-items:center; gap:8px;
+}
+summary::-webkit-details-marker{display:none}
+summary::after{content:"＋"; margin-left:auto; color:var(--faint); font-family:var(--f-body)}
+details[open] summary::after{content:"－"}
+.row{display:flex; align-items:center; gap:10px; padding:9px 0; border-top:1px solid var(--line); flex-wrap:wrap}
+.row > .k{font-size:13px; color:var(--dim); flex:none; min-width:6.4em}
+.row > .c{flex:1; min-width:150px; display:flex; align-items:center; gap:9px; flex-wrap:wrap}
+.row .hint{font-size:11.5px; color:var(--faint); flex-basis:100%}
+.seg{display:flex; gap:0; border:1px solid var(--line2); border-radius:10px; overflow:hidden}
+.seg button{background:var(--bg); border:0; padding:7px 11px; font-size:12.5px; color:var(--dim); border-right:1px solid var(--line)}
+.seg button:last-child{border-right:0}
+.seg button[aria-pressed="true"]{background:var(--accent); color:#fff}
+.sw{display:inline-flex; align-items:center; gap:8px; font-size:13px; color:var(--dim)}
+.sw input{width:19px; height:19px; accent-color:var(--accent)}
+.btn{
+  background:var(--surface2); border:1px solid var(--line2); border-radius:10px;
+  padding:8px 13px; font-size:13px;
+}
+.btn:active{transform:translateY(1px)}
+.btn.ghost{background:transparent}
+.tips{font-size:12.5px; color:var(--dim); line-height:1.75}
+.tips ul{margin:6px 0 0; padding-left:1.25em}
+.tips li{margin-bottom:5px}
+.tips b{color:var(--fg)}
+
+/* ---- 下端固定バー ---- */
+.dock{
+  position:fixed; left:0; right:0; bottom:0; z-index:20;
+  background:rgba(19,16,27,.93);
+  -webkit-backdrop-filter:blur(12px); backdrop-filter:blur(12px);
+  border-top:1px solid var(--line);
+  padding:10px max(14px, env(safe-area-inset-left, 0px)) calc(10px + env(safe-area-inset-bottom, 0px)) max(14px, env(safe-area-inset-right, 0px));
+}
+.dockIn{max-width:560px; margin:0 auto; display:flex; gap:9px; align-items:stretch}
+.go{
+  flex:1; border:0; border-radius:13px; padding:13px 10px;
+  background:linear-gradient(135deg,#ff2e74,#ff7a3d); color:#fff;
+  font-family:var(--f-disp); font-size:17px; letter-spacing:.09em;
+  box-shadow:0 6px 18px rgba(255,46,116,.3);
+}
+.go.stop{background:linear-gradient(135deg,#3a3050,#2a2340); box-shadow:none; border:1px solid var(--line2)}
+.dock .btn{flex:none; min-width:68px; text-align:center}
+.dock .btn.on{background:var(--accent); border-color:var(--accent); color:#fff}
+@media (prefers-reduced-motion: reduce){
+  *{transition-duration:.01ms !important}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <span class="lamp" id="lamp"></span>
+    <div class="brand">
+      <h1>BATERIA BPM</h1>
+      <span class="sub">サンバ練習用テンポ計</span>
+    </div>
+    <span class="spacer"></span>
+    <span class="pill" id="pillRange">90–175</span>
+  </header>
+
+  <div class="banner" id="banner"><span>⚠️</span><span id="bannerText"></span></div>
+
+  <div class="levels" aria-hidden="true">
+    <span class="lab">低</span><span class="bar" id="lvL"><i></i></span>
+    <span class="lab">中</span><span class="bar" id="lvM"><i></i></span>
+    <span class="lab">高</span><span class="bar" id="lvH"><i></i></span>
+  </div>
+
+  <div class="stage">
+    <div class="gaugeBox idle" id="gaugeBox">
+      <div class="glow" id="glow"></div>
+      <svg class="gauge" viewBox="0 0 200 200" aria-hidden="true">
+        <circle class="trk" cx="100" cy="100" r="88"></circle>
+        <circle class="conf" cx="100" cy="100" r="79" pathLength="1" id="confArc"
+                transform="rotate(-90 100 100)" stroke-dasharray="0 1"></circle>
+        <circle class="arc" cx="100" cy="100" r="88" pathLength="1" id="phaseArc"
+                transform="rotate(-90 100 100)" stroke-dasharray="0 1"></circle>
+      </svg>
+      <div class="readout">
+        <div class="bpmLine">
+          <span class="bpmInt" id="bpmInt">---</span><span class="bpmDec" id="bpmDec"></span>
+        </div>
+        <div class="unit">BPM</div>
+        <div class="state" id="stateMsg">マイクを許可して開始</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="beats" id="beats">
+    <span class="dot one"></span><span class="dot"></span>
+    <button class="btnMini" id="btnDown" type="button">頭合わせ</button>
+  </div>
+
+  <div class="card">
+    <h2>目標とのズレ<span class="r" id="tolLabel">許容 ±1.5</span></h2>
+    <div class="devHead">
+      <span class="devNum" id="devNum">--</span>
+      <span class="devWord" id="devWord">目標BPMを決めると判定します</span>
+    </div>
+    <div class="devTrack">
+      <div class="zone" id="devZone"></div>
+      <div class="mid"></div>
+      <div class="needle" id="devNeedle"></div>
+    </div>
+    <div class="devScale"><span>−8</span><span>−4</span><span>目標</span><span>+4</span><span>+8</span></div>
+    <div class="tgtRow">
+      <label for="target">目標BPM</label>
+      <input type="number" id="target" min="40" max="260" step="0.5" inputmode="decimal" placeholder="未設定">
+      <button class="btn ghost" id="btnUseCur" type="button">現在値を入れる</button>
+      <button class="btn ghost" id="btnTap" type="button">タップ入力</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>推移<span class="r" id="graphSpanLab">直近3分</span></h2>
+    <canvas id="graph"></canvas>
+    <canvas id="scope"></canvas>
+  </div>
+
+  <div class="card">
+    <h2>セッション<span class="r"><button class="btn ghost" id="btnReset" type="button">リセット</button></span></h2>
+    <div class="stats">
+      <div class="stat"><div class="k">経過</div><div class="v" id="stTime">0:00</div></div>
+      <div class="stat"><div class="k">平均</div><div class="v" id="stAvg">--</div></div>
+      <div class="stat"><div class="k">最小</div><div class="v" id="stMin">--</div></div>
+      <div class="stat"><div class="k">最大</div><div class="v" id="stMax">--</div></div>
+      <div class="stat"><div class="k">開始→現在</div><div class="v" id="stDrift">--</div></div>
+    </div>
+    <div class="tgtRow"><button class="btn ghost" id="btnCopy" type="button">結果をコピー</button><span class="hint" id="copyMsg" style="font-size:11.5px;color:var(--faint)"></span></div>
+  </div>
+
+  <details id="settings">
+    <summary>設定</summary>
+
+    <div class="row">
+      <span class="k">BPM範囲</span>
+      <div class="c">
+        <div class="seg" id="segRange">
+          <button type="button" data-min="88"  data-max="118">サンバヘギ</button>
+          <button type="button" data-min="115" data-max="160">バツカーダ</button>
+          <button type="button" data-min="90"  data-max="175">おまかせ</button>
+        </div>
+        <button class="btn ghost" id="btnHalf" type="button">÷2</button>
+        <button class="btn ghost" id="btnDouble" type="button">×2</button>
+        <span class="hint">範囲を狭めるほど安定します。範囲は常に2倍未満に保たれ、倍・半分の取り違えを防ぎます。</span>
+      </div>
+    </div>
+
+    <div class="row">
+      <span class="k">範囲を手動</span>
+      <div class="c">
+        <input type="number" id="rMin" min="40" max="240" step="1" inputmode="numeric">
+        <span style="color:var(--faint)">〜</span>
+        <input type="number" id="rMax" min="50" max="300" step="1" inputmode="numeric">
+      </div>
+    </div>
+
+    <div class="row">
+      <span class="k">重視する音</span>
+      <div class="c">
+        <div class="seg" id="segWeight">
+          <button type="button" data-w="surdo">スルド重視</button>
+          <button type="button" data-w="flat">均等</button>
+          <button type="button" data-w="caixa">高域重視</button>
+        </div>
+        <span class="hint">既定のスルド重視は低音（スルド）を拍の手がかりにします。スルドが遠い・人数が少ない時は均等、カイシャやシャカシャカ主体なら高域重視。</span>
+      </div>
+    </div>
+
+    <div class="row">
+      <span class="k">感度</span>
+      <div class="c"><input type="range" id="sens" min="100" max="3000" step="50"><span class="hint" id="sensLab"></span></div>
+    </div>
+
+    <div class="row">
+      <span class="k">応答</span>
+      <div class="c">
+        <div class="seg" id="segWin">
+          <button type="button" data-s="4">速い</button>
+          <button type="button" data-s="6">標準</button>
+          <button type="button" data-s="9">安定</button>
+        </div>
+        <span class="hint">解析に使う秒数。速いほど追従が早く、長いほどブレません。</span>
+      </div>
+    </div>
+
+    <div class="row">
+      <span class="k">拍子</span>
+      <div class="c">
+        <div class="seg" id="segMeter">
+          <button type="button" data-m="2">2拍</button>
+          <button type="button" data-m="4">4拍</button>
+        </div>
+        <span class="hint">表示用のカウントだけが変わります。頭の位置は「頭合わせ」を1拍目で押してください。</span>
+      </div>
+    </div>
+
+    <div class="row">
+      <span class="k">許容幅</span>
+      <div class="c"><input type="number" id="tol" min="0.5" max="10" step="0.5" inputmode="decimal"><span class="hint">この幅に入っていれば「ジャスト」と判定します。</span></div>
+    </div>
+
+    <div class="row">
+      <span class="k">その他</span>
+      <div class="c">
+        <label class="sw"><input type="checkbox" id="optClick">クリック音</label>
+        <label class="sw"><input type="checkbox" id="optWake">画面を消さない</label>
+        <span class="hint">クリック音はスピーカーから出すとマイクが自分の音を拾って検出が引っぱられます。イヤホン併用時だけ推奨。</span>
+      </div>
+    </div>
+
+    <div class="row">
+      <span class="k">動作確認</span>
+      <div class="c">
+        <input type="number" id="testBpm" min="60" max="200" step="1" value="132" inputmode="numeric">
+        <button class="btn" id="btnTest" type="button">自己テスト</button>
+        <span class="hint">マイクを使わず、内蔵のサンバ風パターン（スルド＋カイシャ16分＋タンボリン）を鳴らして検出を確認します。練習前のチェック用。</span>
+      </div>
+    </div>
+  </details>
+
+  <details id="help">
+    <summary>使い方とコツ</summary>
+    <div class="tips">
+      <ul>
+        <li><b>置き場所</b>：スルドから2〜3m離し、バテリア全体が見渡せる位置に。スルドの真横だと低音が飽和して拍が潰れます。</li>
+        <li><b>範囲を決める</b>：曲の見当がつくなら「サンバヘギ」か「バツカーダ」に。範囲が狭いほど表示が落ち着きます。</li>
+        <li><b>走りの確認</b>：頭の本番テンポを目標BPMに入れて走り出す。推移グラフが右肩上がりなら全体が走っています。</li>
+        <li><b>倍・半分が出たら</b>：÷2 または ×2 を押すと範囲ごと切り替わります。</li>
+        <li><b>表示が暴れる</b>：応答を「安定」に、重視する音を「スルド重視」に。それでも駄目なら感度を下げてカイシャの刻みを拾いすぎないように。</li>
+        <li><b>iPhone</b>：Safariで開き、マイクの許可を「許可」に。消音スイッチがオンでもマイク入力は動きますが、クリック音は鳴りません。</li>
+      </ul>
+    </div>
+  </details>
+
+  <p class="eyebrow" style="text-align:center;margin:18px 0 4px">BATERIA BPM · バツカーダ／サンバヘギ用</p>
+</div>
+
+<div class="dock">
+  <div class="dockIn">
+    <button class="go" id="btnGo" type="button">開始</button>
+    <button class="btn" id="btnHold" type="button">ホールド</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ============================================================
+   Bateria BPM — マイク入力からのリアルタイムテンポ検出
+   帯域分割（スルド／中域／カイシャ）→ オンセット強度関数 →
+   自己相関＋倍音和＋連続性 → テンポ、位相はPLLで追従。
+   ============================================================ */
+
+const HOP = 128;          // AudioWorklet の 1 quantum
+const POST = 8;           // 8 quantum ごとにメインスレッドへ送る（約21ms）
+const RING = 4096;        // 包絡線リングバッファ長（約10.9秒 @48kHz）
+const W_PRESETS = {surdo:[1.0,0.45,0.30], flat:[0.70,0.70,0.70], caixa:[0.40,0.50,1.0]};
+
+const S = {
+  running:false, mode:"idle",       // idle | mic | test
+  ctx:null, stream:null, track:null, node:null, inBus:null, monitor:null,
+  fsEnv:0, hopDur:0,
+  bpmMin:90, bpmMax:175, weights:W_PRESETS.surdo.slice(), wKey:"surdo",
+  gain:600, winSec:6, meter:2, tol:1.5, target:null,
+  click:false, wake:false, hold:false,
+  // リングバッファ
+  cL:new Float32Array(RING), cM:new Float32Array(RING), cH:new Float32Array(RING),
+  ons:new Float32Array(RING), tAt:new Float64Array(RING),
+  n:0,                              // 書き込んだ総フレーム数
+  lvl:[0,0,0], peak:0,
+  scratch:new Float32Array(RING),
+  // 推定結果
+  bpm:0, disp:0, conf:0, period:0, jitter:0,
+  raws:[],                          // 直近の生推定
+  beat:{ref:0, period:0, locked:false, idx:0, anchor:0, scheduled:-1},
+  hist:[],                          // {t,bpm,conf}
+  stats:{n:0, sum:0, min:Infinity, max:0, t0:null, first:0, lastT:0},
+  test:{on:false, bpm:132, timer:null, next:0, step:0, noise:null},
+  wakeLock:null, lastEst:0, lastGraph:0, lowSince:0
+};
+
+/* ---------- DOM ---------- */
+const $ = id => document.getElementById(id);
+const el = {
+  lamp:$("lamp"), pillRange:$("pillRange"), banner:$("banner"), bannerText:$("bannerText"),
+  lvL:$("lvL").firstElementChild, lvM:$("lvM").firstElementChild, lvH:$("lvH").firstElementChild,
+  gaugeBox:$("gaugeBox"), glow:$("glow"), phaseArc:$("phaseArc"), confArc:$("confArc"),
+  bpmInt:$("bpmInt"), bpmDec:$("bpmDec"), stateMsg:$("stateMsg"),
+  beats:$("beats"), btnDown:$("btnDown"),
+  devNum:$("devNum"), devWord:$("devWord"), devNeedle:$("devNeedle"), devZone:$("devZone"),
+  tolLabel:$("tolLabel"), target:$("target"), btnUseCur:$("btnUseCur"), btnTap:$("btnTap"),
+  graph:$("graph"), scope:$("scope"), graphSpanLab:$("graphSpanLab"),
+  stTime:$("stTime"), stAvg:$("stAvg"), stMin:$("stMin"), stMax:$("stMax"), stDrift:$("stDrift"),
+  btnReset:$("btnReset"), btnCopy:$("btnCopy"), copyMsg:$("copyMsg"),
+  segRange:$("segRange"), segWeight:$("segWeight"), segWin:$("segWin"), segMeter:$("segMeter"),
+  rMin:$("rMin"), rMax:$("rMax"), sens:$("sens"), sensLab:$("sensLab"), tol:$("tol"),
+  optClick:$("optClick"), optWake:$("optWake"), testBpm:$("testBpm"), btnTest:$("btnTest"),
+  btnHalf:$("btnHalf"), btnDouble:$("btnDouble"), btnGo:$("btnGo"), btnHold:$("btnHold")
+};
+
+const clamp = (v,a,b) => v<a?a:(v>b?b:v);
+const fmt1 = v => (Math.round(v*10)/10).toFixed(1);
+
+/* ---------- 大きな数字（桁幅を固定してガタつきを防ぐ） ---------- */
+function setDigits(node, str){
+  if(node.dataset.v === str) return;
+  node.dataset.v = str;
+  node.textContent = "";
+  for(const ch of str){
+    const s = document.createElement("span");
+    s.className = (ch === "." ? "d dot" : "d");
+    s.textContent = ch;
+    node.appendChild(s);
+  }
+}
+
+/* ============================================================
+   設定の保存／復元
+   ============================================================ */
+const STORE = "bateria-bpm/v1";
+function saveCfg(){
+  try{
+    localStorage.setItem(STORE, JSON.stringify({
+      bpmMin:S.bpmMin, bpmMax:S.bpmMax, wKey:S.wKey, gain:S.gain, winSec:S.winSec,
+      meter:S.meter, tol:S.tol, target:S.target, click:S.click, wake:S.wake,
+      testBpm:Number(el.testBpm.value)||132
+    }));
+  }catch(e){ /* プライベートモード等では保存できない */ }
+}
+function loadCfg(){
+  let c = null;
+  try{ c = JSON.parse(localStorage.getItem(STORE) || "null"); }catch(e){ c = null; }
+  if(c){
+    if(c.bpmMin && c.bpmMax) setRange(c.bpmMin, c.bpmMax, true);
+    if(c.wKey && W_PRESETS[c.wKey]) setWeights(c.wKey, true);
+    if(c.gain) S.gain = c.gain;
+    if(c.winSec) S.winSec = c.winSec;
+    if(c.meter) S.meter = c.meter;
+    if(typeof c.tol === "number") S.tol = c.tol;
+    if(typeof c.target === "number") S.target = c.target;
+    S.click = !!c.click; S.wake = !!c.wake;
+    if(c.testBpm) el.testBpm.value = c.testBpm;
+  }
+  el.sens.value = S.gain;
+  el.tol.value = S.tol;
+  el.target.value = (S.target == null ? "" : S.target);
+  el.optClick.checked = S.click;
+  el.optWake.checked = S.wake;
+  syncSeg(el.segWin, b => Number(b.dataset.s) === S.winSec);
+  syncSeg(el.segMeter, b => Number(b.dataset.m) === S.meter);
+  buildBeatDots();
+  renderRange();
+  renderTarget();
+  el.sensLab.textContent = sensWord(S.gain);
+}
+function syncSeg(seg, test){
+  for(const b of seg.querySelectorAll("button")) b.setAttribute("aria-pressed", test(b) ? "true" : "false");
+}
+const sensWord = g => (g<400 ? "低め（大音量向き）" : g<1200 ? "標準" : "高め（遠い・小音量向き）");
+
+/* ============================================================
+   範囲・重み
+   ============================================================ */
+function setRange(min, max, silent){
+  min = clamp(Math.round(min), 40, 240);
+  max = clamp(Math.round(max), min+8, 300);
+  if(max >= min*2) max = Math.floor(min*2) - 1;   // 倍・半分の曖昧さを排除
+  S.bpmMin = min; S.bpmMax = max;
+  S.beat.locked = false; S.raws.length = 0;
+  if(!silent){ renderRange(); saveCfg(); }
+}
+function renderRange(){
+  el.pillRange.textContent = S.bpmMin + "–" + S.bpmMax;
+  el.rMin.value = S.bpmMin; el.rMax.value = S.bpmMax;
+  syncSeg(el.segRange, b => Number(b.dataset.min) === S.bpmMin && Number(b.dataset.max) === S.bpmMax);
+}
+function setWeights(key, silent){
+  S.wKey = key; S.weights = W_PRESETS[key].slice();
+  syncSeg(el.segWeight, b => b.dataset.w === key);
+  if(!silent) saveCfg();
+}
+
+/* ============================================================
+   オーディオグラフ
+   ============================================================ */
+const WORKLET_SRC = `
+class BandEnv extends AudioWorkletProcessor {
+  constructor(){ super(); this.k = 0; this.out = new Float32Array(${POST} * 4); }
+  process(inputs){
+    const inp = inputs[0];
+    const n = 128;
+    let a = 0, b = 0, c = 0, pk = 0;
+    if(inp && inp.length){
+      const c0 = inp[0], c1 = inp[1], c2 = inp[2], c3 = inp[3];
+      if(c0) for(let i=0;i<n;i++){ const v = c0[i]; a += v*v; }
+      if(c1) for(let i=0;i<n;i++){ const v = c1[i]; b += v*v; }
+      if(c2) for(let i=0;i<n;i++){ const v = c2[i]; c += v*v; }
+      if(c3) for(let i=0;i<n;i++){ const v = c3[i] < 0 ? -c3[i] : c3[i]; if(v > pk) pk = v; }
+    }
+    const o = this.k * 4;
+    this.out[o] = Math.sqrt(a/n); this.out[o+1] = Math.sqrt(b/n);
+    this.out[o+2] = Math.sqrt(c/n); this.out[o+3] = pk;
+    if(++this.k >= ${POST}){
+      this.k = 0;
+      this.port.postMessage({t: currentTime, d: this.out.slice(0)});
+    }
+    return true;
+  }
+}
+registerProcessor('band-env', BandEnv);
+`;
+
+function bq(ctx, type, freq, q){
+  const f = ctx.createBiquadFilter();
+  f.type = type; f.frequency.value = freq; f.Q.value = q;
+  return f;
+}
+function chain(nodes){
+  for(let i=0;i<nodes.length-1;i++) nodes[i].connect(nodes[i+1]);
+  return {head:nodes[0], tail:nodes[nodes.length-1]};
+}
+
+async function buildGraph(){
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AC({latencyHint:"interactive"});
+  S.ctx = ctx;
+  S.fsEnv = ctx.sampleRate / HOP;
+  S.hopDur = HOP / ctx.sampleRate;
+
+  // 入力バス：マイクでも内蔵テスト音源でも、ここから先は同じ経路
+  const inBus = ctx.createGain(); inBus.gain.value = 1; S.inBus = inBus;
+
+  const low  = chain([bq(ctx,"lowpass",105,0.9), bq(ctx,"lowpass",105,0.9), bq(ctx,"highpass",38,0.7)]);
+  const mid  = chain([bq(ctx,"highpass",220,0.7), bq(ctx,"lowpass",1400,0.7)]);
+  const high = chain([bq(ctx,"highpass",2600,0.7), bq(ctx,"lowpass",9000,0.7)]);
+  const raw  = bq(ctx,"highpass",25,0.7);
+  inBus.connect(low.head); inBus.connect(mid.head); inBus.connect(high.head); inBus.connect(raw);
+
+  const merger = ctx.createChannelMerger(4);
+  low.tail.connect(merger, 0, 0);
+  mid.tail.connect(merger, 0, 1);
+  high.tail.connect(merger, 0, 2);
+  raw.connect(merger, 0, 3);
+
+  let node = null, ok = false;
+  if(ctx.audioWorklet){
+    try{
+      const url = URL.createObjectURL(new Blob([WORKLET_SRC], {type:"application/javascript"}));
+      await ctx.audioWorklet.addModule(url);
+      URL.revokeObjectURL(url);
+      node = new AudioWorkletNode(ctx, "band-env", {
+        numberOfInputs:1, numberOfOutputs:1, outputChannelCount:[1],
+        channelCount:4, channelCountMode:"explicit", channelInterpretation:"discrete"
+      });
+      node.port.onmessage = e => onEnvelope(e.data);
+      ok = true;
+    }catch(err){ node = null; }
+  }
+  if(!ok){
+    // 古いSafari向けフォールバック
+    node = ctx.createScriptProcessor(512, 4, 1);
+    node.onaudioprocess = ev => {
+      const b = ev.inputBuffer, len = b.length, hops = Math.floor(len / HOP);
+      const ch = [];
+      for(let c=0;c<4;c++) ch.push(b.numberOfChannels > c ? b.getChannelData(c) : null);
+      const out = new Float32Array(hops*4);
+      for(let h=0;h<hops;h++){
+        let a=0,m=0,t=0,pk=0;
+        const off = h*HOP;
+        for(let i=0;i<HOP;i++){
+          if(ch[0]){ const v=ch[0][off+i]; a+=v*v; }
+          if(ch[1]){ const v=ch[1][off+i]; m+=v*v; }
+          if(ch[2]){ const v=ch[2][off+i]; t+=v*v; }
+          if(ch[3]){ const v=Math.abs(ch[3][off+i]); if(v>pk) pk=v; }
+        }
+        out[h*4]=Math.sqrt(a/HOP); out[h*4+1]=Math.sqrt(m/HOP);
+        out[h*4+2]=Math.sqrt(t/HOP); out[h*4+3]=pk;
+      }
+      onEnvelope({t:ctx.currentTime, d:out});
+    };
+  }
+  S.node = node;
+  merger.connect(node);
+
+  // 解析ノードを無音でdestinationへ繋ぐ（Safariでグラフが駆動されるように）
+  const mute = ctx.createGain(); mute.gain.value = 0;
+  node.connect(mute); mute.connect(ctx.destination);
+
+  // クリック音・テスト音のモニタ出力
+  const mon = ctx.createGain(); mon.gain.value = 1; mon.connect(ctx.destination);
+  S.monitor = mon;
+
+  return ctx;
+}
+
+/* ============================================================
+   包絡線の受信とオンセット強度関数
+   ============================================================ */
+function onEnvelope(msg){
+  const d = msg.d, cnt = (d.length/4)|0;
+  const tLast = msg.t;
+  for(let i=0;i<cnt;i++){
+    const o = i*4;
+    const t = tLast - (cnt-1-i)*S.hopDur;
+    const g = S.gain;
+    const cl = Math.log1p(d[o]   * g);
+    const cm = Math.log1p(d[o+1] * g);
+    const chh= Math.log1p(d[o+2] * g);
+    const idx = S.n & (RING-1), prev = (S.n-1) & (RING-1);
+    let flux = 0;
+    if(S.n > 0){
+      const dl = cl - S.cL[prev], dm = cm - S.cM[prev], dh = chh - S.cH[prev];
+      flux = (dl>0?dl:0)*S.weights[0] + (dm>0?dm:0)*S.weights[1] + (dh>0?dh:0)*S.weights[2];
+    }
+    S.cL[idx]=cl; S.cM[idx]=cm; S.cH[idx]=chh;
+    S.ons[idx]=flux; S.tAt[idx]=t;
+    S.n++;
+    S.lvl[0] = Math.max(S.lvl[0]*0.92, Math.min(1, cl/4.2));
+    S.lvl[1] = Math.max(S.lvl[1]*0.92, Math.min(1, cm/4.2));
+    S.lvl[2] = Math.max(S.lvl[2]*0.92, Math.min(1, chh/4.2));
+    S.peak = Math.max(S.peak*0.95, d[o+3]);
+  }
+}
+
+/* ============================================================
+   テンポ推定：自己相関＋倍音和＋連続性
+   ============================================================ */
+function estimate(){
+  const fs = S.fsEnv;
+  const want = Math.round(S.winSec * fs);
+  const N = Math.min(S.n, want, RING - 8);
+  const lagMin = Math.floor(fs*60/S.bpmMax);
+  const lagMax = Math.ceil(fs*60/S.bpmMin);
+  if(N < lagMax*3 + 16) return null;          // 最低3周期ぶん溜まるまで待つ
+
+  // リングから連続領域へコピー
+  const x = S.scratch;
+  const base = S.n - N;
+  for(let i=0;i<N;i++) x[i] = S.ons[(base+i) & (RING-1)];
+
+  // 平均と分散を除去
+  let mean = 0;
+  for(let i=0;i<N;i++) mean += x[i];
+  mean /= N;
+  let va = 0;
+  for(let i=0;i<N;i++){ const v = x[i]-mean; x[i]=v; va += v*v; }
+  va /= N;
+  if(va < 1e-10) return null;
+
+  // 自己相関（倍音項のため探索上限の2倍強まで）
+  const lagTop = Math.min(2*lagMax + 4, Math.floor(N*0.62));
+  const r = new Float32Array(lagTop+2);
+  for(let L=lagMin; L<=lagTop; L++){
+    let s = 0;
+    const lim = N - L;
+    for(let i=0;i<lim;i++) s += x[i]*x[i+L];
+    r[L] = (s/lim)/va;
+  }
+
+  // スコア：倍音和・テンポ事前分布・連続性ボーナス
+  const centre = S.target || Math.sqrt(S.bpmMin*S.bpmMax);
+  const curL = (S.beat.locked && S.period > 0) ? (fs*60/S.disp) : 0;
+  let bestL = -1, best = -Infinity, sum = 0, cntS = 0;
+  for(let L=lagMin; L<=lagMax; L++){
+    let sc = r[L];
+    if(2*L <= lagTop) sc += 0.55*r[2*L];
+    if(3*L <= lagTop) sc += 0.30*r[3*L];
+    const bpm = 60*fs/L;
+    sc *= Math.exp(-0.5*Math.pow(Math.log2(bpm/centre)/0.85, 2));
+    if(curL > 0){
+      const dz = (L-curL)/(0.055*curL);
+      sc *= 1 + 0.22*Math.exp(-0.5*dz*dz);
+    }
+    sum += sc; cntS++;
+    if(sc > best){ best = sc; bestL = L; }
+  }
+  if(bestL < 0) return null;
+  const meanS = sum/cntS;
+
+  // 放物線補間で lag を細かく求める
+  let Lr = bestL;
+  if(bestL > lagMin && bestL < lagTop){
+    const y0=r[bestL-1], y1=r[bestL], y2=r[bestL+1];
+    const den = y0 - 2*y1 + y2;
+    if(Math.abs(den) > 1e-9){
+      const dd = 0.5*(y0-y2)/den;
+      if(dd > -1 && dd < 1) Lr = bestL + dd;
+    }
+  }
+  const bpm = 60*fs/Lr;
+  const prom = (best - meanS)/(Math.abs(best)+1e-9);
+  const conf = clamp(0.55*clamp(r[bestL]/0.22, 0, 1) + 0.45*clamp(prom/0.45, 0, 1), 0, 1);
+  S.dbg = {peak:r[bestL], prom, N};
+
+  // 位相（直近のビート位置）
+  const P = Math.round(Lr);
+  let bestPh = 0, bestV = -Infinity;
+  const nb = Math.min(10, Math.floor(N/P) - 1);
+  for(let ph=0; ph<P; ph++){
+    let s = 0, w = 1;
+    for(let k=0;k<nb;k++){
+      const idx = N-1-ph-Math.round(k*Lr);
+      if(idx < 1) break;
+      s += x[idx]*w; w *= 0.88;
+    }
+    if(s > bestV){ bestV = s; bestPh = ph; }
+  }
+  const tNewest = S.tAt[(S.n-1) & (RING-1)];
+  const lastBeat = tNewest - bestPh/fs;
+
+  return {bpm, conf, period:Lr/fs, lastBeat};
+}
+
+/* ---------- 推定結果の取り込み（中央値＋PLL） ---------- */
+function applyEstimate(e){
+  const now = S.ctx ? S.ctx.currentTime : 0;
+  S.conf = S.conf + (e.conf - S.conf)*0.35;
+
+  if(e.conf < 0.12){
+    if(!S.lowSince) S.lowSince = now;
+    if(now - S.lowSince > 2.5){ S.beat.locked = false; S.raws.length = 0; }
+    return;
+  }
+  S.lowSince = 0;
+
+  S.raws.push(e.bpm);
+  if(S.raws.length > 5) S.raws.shift();
+  const sorted = S.raws.slice().sort((a,b)=>a-b);
+  const med = sorted[sorted.length>>1];
+
+  // ばらつき（±表示用）
+  let m=0; for(const v of S.raws) m+=v; m/=S.raws.length;
+  let sd=0; for(const v of S.raws) sd+=(v-m)*(v-m);
+  S.jitter = Math.sqrt(sd/S.raws.length);
+
+  S.bpm = med;
+  if(!S.disp) S.disp = med;
+  if(!S.hold){
+    const a = clamp(0.10 + 0.45*e.conf, 0.10, 0.55);
+    S.disp += (med - S.disp)*a;
+  }
+  S.period = 60/S.disp;
+
+  // 位相PLL
+  const b = S.beat;
+  if(!b.locked){
+    b.ref = e.lastBeat; b.period = e.period; b.locked = true;
+    b.idx = Math.floor((now - b.ref)/b.period); b.anchor = b.idx;
+  }else{
+    b.period += (S.period - b.period)*0.30;
+    let err = e.lastBeat - b.ref;
+    err -= b.period*Math.round(err/b.period);
+    b.ref += 0.20*err;
+  }
+
+  // 履歴・統計
+  if(e.conf > 0.22 && !S.hold){
+    const t = now;
+    if(t - S.stats.lastT > 0.45){
+      S.stats.lastT = t;
+      S.hist.push({t, bpm:S.disp, conf:e.conf});
+      if(S.hist.length > 1600) S.hist.shift();
+      const st = S.stats;
+      if(!st.n) st.first = S.disp;
+      st.n++; st.sum += S.disp;
+      if(S.disp < st.min) st.min = S.disp;
+      if(S.disp > st.max) st.max = S.disp;
+    }
+  }
+}
+
+/* ============================================================
+   描画
+   ============================================================ */
+function buildBeatDots(){
+  const keep = el.btnDown;
+  el.beats.textContent = "";
+  for(let i=0;i<S.meter;i++){
+    const d = document.createElement("span");
+    d.className = "dot" + (i===0 ? " one" : "");
+    el.beats.appendChild(d);
+  }
+  el.beats.appendChild(keep);
+}
+
+function renderTarget(){
+  el.tolLabel.textContent = "許容 ±" + fmt1(S.tol);
+  const halfPct = clamp(S.tol/16*100, 1.5, 48);
+  el.devZone.style.left = (50-halfPct) + "%";
+  el.devZone.style.width = (halfPct*2) + "%";
+}
+
+function renderDeviation(){
+  if(S.target == null || !S.disp){
+    el.devNum.textContent = "--";
+    el.devNum.style.color = "var(--faint)";
+    el.devWord.textContent = S.target == null ? "目標BPMを決めると判定します" : "検出待ち";
+    el.devNeedle.style.left = "50%";
+    el.devNeedle.style.background = "var(--faint)";
+    return;
+  }
+  const d = S.disp - S.target;
+  const sign = d > 0 ? "+" : (d < 0 ? "−" : "±");
+  el.devNum.textContent = sign + fmt1(Math.abs(d));
+  let col, word;
+  if(Math.abs(d) <= S.tol){ col = "var(--ok)"; word = "ジャスト"; }
+  else if(d > 0){ col = "var(--fast)"; word = Math.abs(d) > S.tol*3 ? "かなり走っています" : "走り気味"; }
+  else{ col = "var(--slow)"; word = Math.abs(d) > S.tol*3 ? "かなり落ちています" : "落ち気味"; }
+  el.devNum.style.color = col;
+  el.devWord.textContent = word;
+  el.devNeedle.style.left = clamp(50 + d/8*50, 1, 99) + "%";
+  el.devNeedle.style.background = col;
+}
+
+function elapsed(){
+  const st = S.stats;
+  if(st.t0 == null || !S.ctx) return 0;
+  return Math.max(0, S.ctx.currentTime - st.t0);
+}
+function renderStats(){
+  const st = S.stats;
+  const secs = Math.floor(elapsed());
+  el.stTime.textContent = Math.floor(secs/60) + ":" + String(secs%60).padStart(2,"0");
+  if(st.n){
+    el.stAvg.textContent = fmt1(st.sum/st.n);
+    el.stMin.textContent = fmt1(st.min);
+    el.stMax.textContent = fmt1(st.max);
+    const dr = S.disp - st.first;
+    el.stDrift.textContent = (Math.abs(dr) < 0.05 ? "±" : (dr>0 ? "+" : "−")) + fmt1(Math.abs(dr));
+    el.stDrift.style.color = Math.abs(dr) < 1.5 ? "var(--ok)" : (dr>0 ? "var(--fast)" : "var(--slow)");
+  }else{
+    el.stAvg.textContent = el.stMin.textContent = el.stMax.textContent = el.stDrift.textContent = "--";
+  }
+}
+
+function fitCanvas(c){
+  const dpr = Math.min(window.devicePixelRatio||1, 2.5);
+  const w = c.clientWidth, h = c.clientHeight;
+  if(c.width !== Math.round(w*dpr) || c.height !== Math.round(h*dpr)){
+    c.width = Math.round(w*dpr); c.height = Math.round(h*dpr);
+  }
+  const g = c.getContext("2d");
+  g.setTransform(dpr,0,0,dpr,0,0);
+  return {g, w, h};
+}
+
+function drawGraph(){
+  const {g,w,h} = fitCanvas(el.graph);
+  g.clearRect(0,0,w,h);
+  // 序盤でも読めるよう、経過に応じて時間軸を広げる（最大3分）
+  const SPAN = clamp(elapsed()*1.15, 30, 180);
+  el.graphSpanLab.textContent = SPAN >= 179 ? "直近3分"
+    : (SPAN >= 60 ? "直近" + Math.round(SPAN/60*10)/10 + "分" : "直近" + Math.round(SPAN) + "秒");
+  const now = S.ctx ? S.ctx.currentTime : 0;
+  const pts = S.hist.filter(p => now - p.t <= SPAN);
+
+  // 縦軸の範囲
+  let lo, hi;
+  if(S.target != null){ lo = S.target - 10; hi = S.target + 10; }
+  else if(pts.length){
+    let mn=Infinity, mx=-Infinity;
+    for(const p of pts){ if(p.bpm<mn) mn=p.bpm; if(p.bpm>mx) mx=p.bpm; }
+    const pad = Math.max(3, (mx-mn)*0.4); lo = mn-pad; hi = mx+pad;
+  }else{ lo = S.bpmMin; hi = S.bpmMax; }
+  if(pts.length){
+    for(const p of pts){ if(p.bpm < lo) lo = p.bpm-1; if(p.bpm > hi) hi = p.bpm+1; }
+  }
+  const Y = v => h - 6 - (v-lo)/(hi-lo)*(h-12);
+  const X = t => 34 + (1 - (now-t)/SPAN)*(w-40);
+
+  // 目盛り
+  g.font = "10px ui-sans-serif, system-ui, sans-serif";
+  g.textBaseline = "middle";
+  const ticks = 4;
+  for(let i=0;i<=ticks;i++){
+    const v = lo + (hi-lo)*i/ticks, y = Y(v);
+    g.strokeStyle = "rgba(255,255,255,.055)"; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(34, y); g.lineTo(w-6, y); g.stroke();
+    g.fillStyle = "#6e6484"; g.textAlign = "right";
+    g.fillText(Math.round(v), 30, y);
+  }
+
+  // 許容帯と目標線
+  if(S.target != null){
+    const y1 = Y(S.target+S.tol), y2 = Y(S.target-S.tol);
+    g.fillStyle = "rgba(54,217,155,.12)";
+    g.fillRect(34, Math.min(y1,y2), w-40, Math.abs(y2-y1));
+    g.strokeStyle = "#ffc24a"; g.lineWidth = 1.5; g.setLineDash([5,4]);
+    g.beginPath(); g.moveTo(34, Y(S.target)); g.lineTo(w-6, Y(S.target)); g.stroke();
+    g.setLineDash([]);
+  }
+
+  if(pts.length < 2){
+    g.fillStyle = "#6e6484"; g.textAlign = "center";
+    g.fillText(S.running ? "計測中…" : "開始すると推移が出ます", (w+28)/2, h/2);
+    return;
+  }
+
+  // 折れ線（時間の飛びで区切る）
+  g.lineWidth = 2; g.lineJoin = "round"; g.strokeStyle = "#ff2e74";
+  g.beginPath();
+  let pen = false;
+  for(let i=0;i<pts.length;i++){
+    const p = pts[i];
+    if(i && p.t - pts[i-1].t > 2.2) pen = false;
+    const xx = X(p.t), yy = Y(p.bpm);
+    if(!pen){ g.moveTo(xx,yy); pen = true; } else g.lineTo(xx,yy);
+  }
+  g.stroke();
+
+  // 直近の点
+  const last = pts[pts.length-1];
+  g.fillStyle = "#fff";
+  g.beginPath(); g.arc(X(last.t), Y(last.bpm), 3.2, 0, Math.PI*2); g.fill();
+}
+
+function drawScope(){
+  const {g,w,h} = fitCanvas(el.scope);
+  g.clearRect(0,0,w,h);
+  const fs = S.fsEnv || 375;
+  const SEC = 4;
+  const N = Math.min(S.n, Math.round(SEC*fs), RING-4);
+  if(N < 8){
+    g.fillStyle = "#6e6484"; g.font = "10px ui-sans-serif, system-ui, sans-serif";
+    g.textAlign = "center"; g.textBaseline = "middle";
+    g.fillText("オンセット波形（直近4秒）", w/2, h/2);
+    return;
+  }
+  const base = S.n - N;
+  let mx = 1e-6;
+  for(let i=0;i<N;i++){ const v = S.ons[(base+i)&(RING-1)]; if(v>mx) mx=v; }
+  const cols = Math.min(w, 320), per = N/cols;
+  g.fillStyle = "rgba(255,46,116,.75)";
+  for(let c=0;c<cols;c++){
+    let v = 0;
+    const s = Math.floor(c*per), e2 = Math.min(N, Math.floor((c+1)*per));
+    for(let i=s;i<e2;i++){ const q = S.ons[(base+i)&(RING-1)]; if(q>v) v=q; }
+    const hh = Math.max(1, (v/mx)*(h-10));
+    g.fillRect(c*(w/cols), h-4-hh, Math.max(1, w/cols-0.6), hh);
+  }
+  // ビート位置
+  const b = S.beat;
+  if(b.locked && b.period > 0.1){
+    const tStart = S.tAt[base & (RING-1)], tEnd = S.tAt[(S.n-1)&(RING-1)];
+    g.strokeStyle = "rgba(255,194,74,.85)"; g.lineWidth = 1.5;
+    let k = Math.ceil((tStart - b.ref)/b.period);
+    for(let i=0;i<64;i++){
+      const t = b.ref + (k+i)*b.period;
+      if(t > tEnd) break;
+      const xx = (t - tStart)/(tEnd - tStart)*w;
+      g.beginPath(); g.moveTo(xx, 2); g.lineTo(xx, h-2); g.stroke();
+    }
+  }
+}
+
+/* ---------- 解析ループ（rAFとは独立。描画が間引かれても検出は止めない） ---------- */
+function engine(){
+  if(S.test.on) runTestScheduler();
+  if(!S.running || !S.ctx) return;
+  const now = S.ctx.currentTime;
+  if(now - S.lastEst > 0.15){
+    S.lastEst = now;
+    const e = estimate();
+    if(e) applyEstimate(e);
+    updateReadout();
+    renderDeviation();
+    renderStats();
+  }
+  if(S.click && S.beat.locked && S.beat.period > 0.1) scheduleClicks(now);
+}
+setInterval(engine, 120);
+
+/* ---------- 描画ループ ---------- */
+let rafId = 0;
+function loop(){
+  rafId = requestAnimationFrame(loop);
+  const ctx = S.ctx;
+  const now = ctx ? ctx.currentTime : 0;
+
+  // 入力レベル
+  el.lvL.style.width = (S.lvl[0]*100).toFixed(1)+"%";
+  el.lvM.style.width = (S.lvl[1]*100).toFixed(1)+"%";
+  el.lvH.style.width = (S.lvl[2]*100).toFixed(1)+"%";
+  S.lvl[0]*=0.97; S.lvl[1]*=0.97; S.lvl[2]*=0.97;
+
+  // 拍の位相
+  const b = S.beat;
+  if(S.running && b.locked && b.period > 0.1){
+    const ph = ((now - b.ref)/b.period) % 1;
+    const p = ph < 0 ? ph+1 : ph;
+    el.phaseArc.setAttribute("stroke-dasharray", p.toFixed(4)+" 1");
+    el.glow.style.opacity = (Math.exp(-p*7)*0.95).toFixed(3);
+    const idx = Math.floor((now - b.ref)/b.period);
+    if(idx !== b.idx){
+      b.idx = idx;
+      flashBeat(barPos(idx));
+    }
+  }else{
+    el.phaseArc.setAttribute("stroke-dasharray", "0 1");
+    el.glow.style.opacity = "0";
+  }
+  el.confArc.setAttribute("stroke-dasharray", clamp(S.conf,0,1).toFixed(3)+" 1");
+
+  drawScope();
+  if(now - S.lastGraph > 0.5){ S.lastGraph = now; drawGraph(); }
+}
+
+/* 小節内の位置（0が1拍目）。「頭合わせ」で anchor を動かす */
+function barPos(idx){
+  const m = S.meter;
+  return ((idx - S.beat.anchor) % m + m) % m;
+}
+function flashBeat(pos){
+  const dots = el.beats.querySelectorAll(".dot");
+  dots.forEach((d,i) => d.classList.toggle("hit", i === pos));
+  setTimeout(() => { const d = dots[pos]; if(d) d.classList.remove("hit"); }, 95);
+}
+
+function updateReadout(){
+  const hasVal = S.disp > 0 && S.conf > 0.1;
+  el.gaugeBox.classList.toggle("idle", !hasVal);
+  if(hasVal){
+    const v = S.disp;
+    setDigits(el.bpmInt, String(Math.floor(v)));
+    setDigits(el.bpmDec, "." + String(Math.round((v - Math.floor(v))*10) % 10));
+    let msg;
+    if(S.hold) msg = "ホールド中";
+    else if(S.conf > 0.55) msg = "安定 · ±" + fmt1(S.jitter);
+    else if(S.conf > 0.3) msg = "やや不安定 · ±" + fmt1(S.jitter);
+    else msg = "検出中…";
+    el.stateMsg.textContent = msg + (S.mode === "test" ? "（自己テスト）" : "");
+  }else{
+    setDigits(el.bpmInt, "---");
+    el.bpmDec.textContent = ""; el.bpmDec.dataset.v = "";
+    el.stateMsg.textContent = !S.running ? "マイクを許可して開始"
+      : (S.peak < 0.004 ? "音が小さすぎます（感度を上げてください）" : "テンポを探しています…");
+  }
+}
+
+/* ---------- クリック音 ---------- */
+function scheduleClicks(now){
+  const b = S.beat, ctx = S.ctx;
+  const horizon = now + 0.25;
+  let k = Math.max(b.scheduled+1, Math.ceil((now - b.ref)/b.period));
+  for(let i=0;i<4;i++){
+    const t = b.ref + k*b.period;
+    if(t > horizon) break;
+    if(t > now + 0.01){
+      beep(t, barPos(k) === 0);
+      b.scheduled = k;
+    }
+    k++;
+  }
+}
+function beep(t, accent){
+  const ctx = S.ctx; if(!ctx) return;
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.type = "square";
+  o.frequency.value = accent ? 1760 : 1180;
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(accent ? 0.22 : 0.13, t+0.004);
+  g.gain.exponentialRampToValueAtTime(0.0001, t+0.045);
+  o.connect(g); g.connect(S.monitor);
+  o.start(t); o.stop(t+0.06);
+}
+
+/* ============================================================
+   内蔵テスト音源：サンバ風バテリアパターン
+   スルド（低）＋カイシャ16分（高）＋タンボリン（中）
+   ============================================================ */
+function noiseBuffer(ctx){
+  if(S.test.noise) return S.test.noise;
+  const len = Math.floor(ctx.sampleRate*0.5);
+  const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+  const d = buf.getChannelData(0);
+  for(let i=0;i<len;i++) d[i] = Math.random()*2-1;
+  S.test.noise = buf;
+  return buf;
+}
+function surdoHit(t, amp){
+  const ctx = S.ctx;
+  const o = ctx.createOscillator(), o2 = ctx.createOscillator(), g = ctx.createGain();
+  o.type="sine";  o.frequency.setValueAtTime(92, t);  o.frequency.exponentialRampToValueAtTime(58, t+0.14);
+  o2.type="sine"; o2.frequency.setValueAtTime(140, t); o2.frequency.exponentialRampToValueAtTime(90, t+0.06);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(amp, t+0.006);
+  g.gain.exponentialRampToValueAtTime(0.0001, t+0.30);
+  o.connect(g); o2.connect(g); g.connect(S.inBus); g.connect(S.monitor);
+  o.start(t); o2.start(t); o.stop(t+0.34); o2.stop(t+0.34);
+}
+function noiseHit(t, amp, freq, q, dur){
+  const ctx = S.ctx;
+  const s = ctx.createBufferSource(); s.buffer = noiseBuffer(ctx);
+  const f = ctx.createBiquadFilter(); f.type="bandpass"; f.frequency.value=freq; f.Q.value=q;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(amp, t+0.003);
+  g.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+  s.connect(f); f.connect(g); g.connect(S.inBus); g.connect(S.monitor);
+  s.start(t, Math.random()*0.2); s.stop(t+dur+0.02);
+}
+// 16分の位置（1小節=2拍=8個の16分、2/4）
+const TAMBORIM = [0,3,6,10,13];   // テレコテコ風
+function runTestScheduler(){
+  const ctx = S.ctx; if(!ctx) return;
+  const spb = 60/S.test.bpm;      // 1拍
+  const s16 = spb/4;              // 16分
+  const horizon = ctx.currentTime + 1.5;   // 余裕を持って先行スケジュール
+  while(S.test.next < horizon){
+    const t = S.test.next, k = S.test.step;   // k: 16分の通し番号
+    const in16 = k % 16;                      // 2小節（4拍）周期
+    const beatPos = k % 4;
+    if(beatPos === 0){
+      const beatNo = (k/4) % 2;               // 2/4の1拍目/2拍目
+      surdoHit(t, beatNo === 1 ? 0.60 : 0.42);
+    }
+    // カイシャ：16分の刻み（アクセント付き）
+    noiseHit(t, (beatPos === 0 ? 0.11 : (beatPos === 2 ? 0.085 : 0.055)), 5200, 1.1, 0.028);
+    // タンボリン
+    if(TAMBORIM.indexOf(in16 % 16) >= 0) noiseHit(t, 0.075, 1150, 3.2, 0.05);
+    S.test.next = t + s16;
+    S.test.step = k + 1;
+  }
+}
+
+/* ============================================================
+   起動・停止
+   ============================================================ */
+function showBanner(html){
+  el.bannerText.innerHTML = html;
+  el.banner.classList.add("show");
+}
+function hideBanner(){ el.banner.classList.remove("show"); }
+
+function resetAnalysis(){
+  S.n = 0; S.disp = 0; S.bpm = 0; S.conf = 0; S.jitter = 0; S.raws.length = 0;
+  S.beat.locked = false; S.beat.scheduled = -1; S.lowSince = 0;
+  S.cL.fill(0); S.cM.fill(0); S.cH.fill(0); S.ons.fill(0);
+}
+function resetSession(){
+  S.hist.length = 0;
+  S.stats = {n:0, sum:0, min:Infinity, max:0, t0:(S.ctx ? S.ctx.currentTime : null), first:0, lastT:0};
+  renderStats(); drawGraph();
+}
+
+async function start(mode){
+  if(S.running) await stop();
+  hideBanner();
+  try{
+    if(!S.ctx) await buildGraph();
+    await S.ctx.resume();
+
+    if(mode === "mic"){
+      if(!window.isSecureContext){
+        showBanner("<b>HTTPSで開く必要があります。</b>ブラウザの仕様でマイクは安全な接続（https://）でしか使えません。");
+        return;
+      }
+      if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+        showBanner("<b>このブラウザはマイク入力に対応していません。</b>iPhoneではSafariで開いてください。");
+        return;
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio:{
+          echoCancellation:false, noiseSuppression:false, autoGainControl:false,
+          channelCount:1
+        },
+        video:false
+      });
+      S.stream = stream;
+      S.track = stream.getAudioTracks()[0];
+      if(S.track){
+        S.track.addEventListener("ended", () => {
+          showBanner("<b>マイクが切断されました。</b>他のアプリがマイクを使っている可能性があります。もう一度「開始」を押してください。");
+          stop();
+        });
+      }
+      const src = S.ctx.createMediaStreamSource(stream);
+      S.micSrc = src;
+      src.connect(S.inBus);
+      S.monitor.gain.value = 1;    // クリック音用（既定はオフ）
+      S.mode = "mic";
+    }else{
+      S.test.on = true;
+      S.test.bpm = clamp(Number(el.testBpm.value)||132, 60, 200);
+      S.test.next = S.ctx.currentTime + 0.12;
+      S.test.step = 0;
+      S.monitor.gain.value = 0.5;
+      S.mode = "test";
+    }
+
+    resetAnalysis();
+    resetSession();
+    S.running = true;
+    el.lamp.classList.remove("err"); el.lamp.classList.add("on");
+    el.btnGo.textContent = "停止";
+    el.btnGo.classList.add("stop");
+    el.btnTest.textContent = (mode === "test") ? "テスト停止" : "自己テスト";
+    el.stateMsg.textContent = (mode === "test")
+      ? "自己テスト中 · 期待 " + fmt1(S.test.bpm) + " BPM"
+      : "テンポを探しています…";
+    if(S.wake) requestWake();
+  }catch(err){
+    el.lamp.classList.add("err");
+    const n = err && err.name;
+    if(n === "NotAllowedError" || n === "SecurityError"){
+      showBanner("<b>マイクが許可されていません。</b>iPhoneは「あぁ」ボタン（アドレスバー左）→ Webサイトの設定 → マイク → 許可、またはiOSの設定 → Safari → マイク を確認してください。");
+    }else if(n === "NotFoundError" || n === "OverconstrainedError"){
+      showBanner("<b>マイクが見つかりません。</b>外部マイクを接続している場合は抜き差しして試してください。");
+    }else{
+      showBanner("<b>開始できませんでした。</b>" + (err && err.message ? String(err.message) : String(err)));
+    }
+  }
+}
+
+async function stop(){
+  S.running = false;
+  S.test.on = false;
+  if(S.micSrc){ try{ S.micSrc.disconnect(); }catch(e){} S.micSrc = null; }
+  if(S.stream){ for(const t of S.stream.getTracks()) t.stop(); S.stream = null; S.track = null; }
+  if(S.ctx){ try{ await S.ctx.suspend(); }catch(e){} }
+  S.mode = "idle";
+  el.lamp.classList.remove("on");
+  el.btnGo.textContent = "開始";
+  el.btnGo.classList.remove("stop");
+  el.btnTest.textContent = "自己テスト";
+  el.phaseArc.setAttribute("stroke-dasharray", "0 1");
+  el.glow.style.opacity = "0";
+  updateReadout();
+  releaseWake();
+}
+
+async function requestWake(){
+  try{
+    if("wakeLock" in navigator && !S.wakeLock){
+      S.wakeLock = await navigator.wakeLock.request("screen");
+      S.wakeLock.addEventListener("release", () => { S.wakeLock = null; });
+    }
+  }catch(e){ /* iOS 16.3以前など非対応 */ }
+}
+function releaseWake(){
+  if(S.wakeLock){ try{ S.wakeLock.release(); }catch(e){} S.wakeLock = null; }
+}
+
+/* ============================================================
+   操作
+   ============================================================ */
+el.btnGo.addEventListener("click", () => { S.running ? stop() : start("mic"); });
+el.btnTest.addEventListener("click", () => {
+  if(S.running && S.mode === "test") stop(); else start("test");
+});
+el.btnHold.addEventListener("click", () => {
+  S.hold = !S.hold;
+  el.btnHold.classList.toggle("on", S.hold);
+  updateReadout();
+});
+el.btnDown.addEventListener("click", () => {
+  const b = S.beat;
+  if(!b.locked) return;
+  // 押した瞬間にいちばん近い拍を1拍目にする
+  const now = S.ctx ? S.ctx.currentTime : 0;
+  b.anchor = Math.round((now - b.ref)/b.period);
+  b.scheduled = -1;
+  flashBeat(0);
+});
+el.btnReset.addEventListener("click", resetSession);
+
+el.segRange.addEventListener("click", e => {
+  const b = e.target.closest("button"); if(!b) return;
+  setRange(Number(b.dataset.min), Number(b.dataset.max));
+});
+el.segWeight.addEventListener("click", e => {
+  const b = e.target.closest("button"); if(!b) return;
+  setWeights(b.dataset.w);
+});
+el.segWin.addEventListener("click", e => {
+  const b = e.target.closest("button"); if(!b) return;
+  S.winSec = Number(b.dataset.s);
+  syncSeg(el.segWin, x => Number(x.dataset.s) === S.winSec);
+  saveCfg();
+});
+el.segMeter.addEventListener("click", e => {
+  const b = e.target.closest("button"); if(!b) return;
+  S.meter = Number(b.dataset.m);
+  syncSeg(el.segMeter, x => Number(x.dataset.m) === S.meter);
+  S.beat.anchor = S.beat.idx;
+  buildBeatDots(); saveCfg();
+});
+el.btnHalf.addEventListener("click", () => { setRange(S.bpmMin/2, S.bpmMax/2); });
+el.btnDouble.addEventListener("click", () => { setRange(S.bpmMin*2, S.bpmMax*2); });
+el.rMin.addEventListener("change", () => setRange(Number(el.rMin.value), Number(el.rMax.value)));
+el.rMax.addEventListener("change", () => setRange(Number(el.rMin.value), Number(el.rMax.value)));
+
+el.sens.addEventListener("input", () => {
+  S.gain = Number(el.sens.value);
+  el.sensLab.textContent = sensWord(S.gain);
+});
+el.sens.addEventListener("change", saveCfg);
+
+el.tol.addEventListener("change", () => {
+  S.tol = clamp(Number(el.tol.value)||1.5, 0.5, 10);
+  el.tol.value = S.tol;
+  renderTarget(); renderDeviation(); drawGraph(); saveCfg();
+});
+el.target.addEventListener("change", () => {
+  const v = Number(el.target.value);
+  S.target = (el.target.value === "" || !isFinite(v) || v <= 0) ? null : clamp(v, 40, 260);
+  if(S.target != null) el.target.value = S.target;
+  renderDeviation(); drawGraph(); saveCfg();
+});
+el.btnUseCur.addEventListener("click", () => {
+  if(!S.disp) return;
+  S.target = Math.round(S.disp*10)/10;
+  el.target.value = S.target;
+  renderDeviation(); drawGraph(); saveCfg();
+});
+el.optClick.addEventListener("change", () => {
+  S.click = el.optClick.checked; S.beat.scheduled = -1; saveCfg();
+});
+el.optWake.addEventListener("change", () => {
+  S.wake = el.optWake.checked;
+  if(S.wake && S.running) requestWake(); else releaseWake();
+  saveCfg();
+});
+el.testBpm.addEventListener("change", () => {
+  S.test.bpm = clamp(Number(el.testBpm.value)||132, 60, 200);
+  el.testBpm.value = S.test.bpm;
+  saveCfg();
+});
+
+/* ---------- タップ入力 ---------- */
+let taps = [];
+el.btnTap.addEventListener("click", () => {
+  const t = performance.now()/1000;
+  if(taps.length && t - taps[taps.length-1] > 2.2) taps = [];
+  taps.push(t);
+  if(taps.length > 9) taps.shift();
+  if(taps.length >= 3){
+    const iv = [];
+    for(let i=1;i<taps.length;i++) iv.push(taps[i]-taps[i-1]);
+    iv.sort((a,b)=>a-b);
+    const med = iv[iv.length>>1];
+    const bpm = clamp(60/med, 40, 260);
+    S.target = Math.round(bpm*10)/10;
+    el.target.value = S.target;
+    renderDeviation(); drawGraph(); saveCfg();
+    el.btnTap.textContent = "タップ " + fmt1(S.target);
+  }else{
+    el.btnTap.textContent = "もう少し…";
+  }
+  setTimeout(() => { el.btnTap.textContent = "タップ入力"; }, 2500);
+});
+
+/* ---------- 結果コピー ---------- */
+el.btnCopy.addEventListener("click", async () => {
+  const st = S.stats;
+  const d = new Date();
+  const pad = n => String(n).padStart(2,"0");
+  const lines = [
+    "Bateria BPM 計測結果 " + d.getFullYear() + "-" + pad(d.getMonth()+1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes()),
+    "経過: " + el.stTime.textContent,
+    "平均: " + el.stAvg.textContent + " BPM",
+    "最小: " + el.stMin.textContent + " / 最大: " + el.stMax.textContent + " BPM",
+    "開始→現在: " + el.stDrift.textContent + " BPM",
+    "目標: " + (S.target == null ? "未設定" : fmt1(S.target) + " BPM（許容 ±" + fmt1(S.tol) + "）"),
+    "検出範囲: " + S.bpmMin + "–" + S.bpmMax + " BPM / 重み: " + S.wKey
+  ];
+  if(S.hist.length){
+    lines.push("", "秒,BPM");
+    const t0 = S.hist[0].t;
+    for(const p of S.hist) lines.push((Math.round((p.t-t0)*10)/10) + "," + fmt1(p.bpm));
+  }
+  const text = lines.join("\n");
+  try{
+    await navigator.clipboard.writeText(text);
+    el.copyMsg.textContent = "コピーしました";
+  }catch(e){
+    el.copyMsg.textContent = "コピーできませんでした（長押しで選択してください）";
+  }
+  setTimeout(() => { el.copyMsg.textContent = ""; }, 2600);
+});
+
+/* ---------- 復帰・リサイズ ---------- */
+document.addEventListener("visibilitychange", () => {
+  if(document.visibilityState === "visible" && S.running && S.ctx){
+    S.ctx.resume().catch(()=>{});
+    S.beat.locked = false; S.beat.scheduled = -1;
+    if(S.wake) requestWake();
+  }
+});
+window.addEventListener("resize", () => { drawGraph(); });
+window.addEventListener("orientationchange", () => { setTimeout(drawGraph, 350); });
+
+/* ---------- 初期化 ---------- */
+loadCfg();
+renderTarget();
+renderDeviation();
+renderStats();
+updateReadout();
+drawGraph();
+drawScope();
+if(!window.isSecureContext){
+  showBanner("<b>このページはHTTPSで開く必要があります。</b>マイク入力はブラウザの仕様で安全な接続（https:// または localhost）のみ許可されます。");
+}
+loop();
+
+/* 自己テスト用フック（自動確認で使用） */
+window.__bateria = {
+  S,
+  get reading(){ return S.disp; },
+  get conf(){ return S.conf; },
+  startTest: bpm => { if(bpm) el.testBpm.value = bpm; return start("test"); },
+  startMic: () => start("mic"),
+  stop
+};
+</script>
+</body>
+</html>
