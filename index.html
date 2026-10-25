@@ -528,7 +528,7 @@ const S = {
   lvl:[0,0,0], peak:0,
   scratch:new Float32Array(RING), scratch2:new Float32Array(RING),
   pre:new Float64Array(RING+1), acf:new Float32Array(RING), predBuf:new Float32Array(1024),
-  cumW:null, cumWP:0, prevLag:0,
+  cumW:null, cumWP:0, prevLag:0, quiet:0, disagree:0,
   // 推定結果
   bpm:0, disp:0, conf:0, period:0, jitter:0,
   raws:[],                          // 直近の生推定
@@ -924,6 +924,14 @@ function onOdf(msg){
     stepBeat(S.n, S.tAt[idx]);
     S.n++;
     S.peak = Math.max(S.peak*0.97, peak);
+    // 演奏が途切れたら、前の曲のテンポ仮説を捨てる
+    if(peak < S.gate){
+      if(++S.quiet === Math.round(1.2*S.fsEnv)){
+        S.prevLag = 0; S.raws.length = 0; S.disagree = 0;
+        const b = S.beat;
+        b.locked = false; b.nextFrame = -1; b.predictAt = -1;
+      }
+    }else S.quiet = 0;
     for(let g=0; g<3; g++){
       const db = 20*Math.log10(d[o+2+g] + 1e-7);      // −60dB〜0dB を 0〜1 に
       S.lvl[g] = Math.max(S.lvl[g]*0.9, clamp((db+60)/60, 0, 1));
@@ -1026,7 +1034,7 @@ function estimate(){
   let va = 0; for(let i=0;i<N;i++){ const v = y[i]-mean; y[i]=v; va += v*v; } va /= N;
   if(va < 1e-12) return null;
 
-  const lagTop = Math.min(4*lagMax + 4, Math.floor(N*0.7));
+  const lagTop = Math.min(4*lagMax + 4, Math.floor(N*0.78));
   const r = S.acf;
   for(let L=1; L<=lagTop; L++){
     let s = 0; const lim = N - L;
@@ -1041,9 +1049,12 @@ function estimate(){
   // 事前分布は弱くしておく。強く効かせると、16分を刻む編成では
   // 「速すぎる段」を拾ってしまう（60で叩いて120と出る原因だった）。
   // 遅すぎる段は下の拍段の検証で落とすので、ここは広めでよい。
+  // 目標BPMがあればそこへ強く寄せる。なければほぼ平坦にして、
+  // どの段を拍とみなすかは櫛形スコアと下の裏表比の判定に任せる。
   const centre = S.target || Math.sqrt(S.bpmMin*S.bpmMax);
-  const sig = S.target ? 0.30 : 1.1;
+  const sig = S.target ? 0.30 : 1.6;
   let best = -Infinity, bestL = -1, sum = 0, cnt = 0;
+  let bestFree = -Infinity, freeL = -1;      // 連続性を掛けない最良（段の固着を破るため）
   const comb = S.combDbg && S.combDbg.length > lagMax ? S.combDbg : (S.combDbg = new Float32Array(RING));
   for(let p=lagMin; p<=lagMax; p++){
     let s = 0, used = 0;
@@ -1057,10 +1068,12 @@ function estimate(){
     }
     if(used) s /= used;   // 窓に入る倍音の数で割る（遅いテンポが不利にならないように）
     const z = Math.log2((60*fs/p)/centre)/sig;
-    let sc = s * Math.exp(-0.5*z*z);
-    if(S.prevLag > 0){                          // 直前のテンポ仮説からの遷移重み
-      const z = (p - S.prevLag)/(0.07*S.prevLag);
-      sc *= 0.45 + 0.55*Math.exp(-0.5*z*z);
+    const scFree = s * Math.exp(-0.5*z*z);
+    if(scFree > bestFree){ bestFree = scFree; freeL = p; }
+    let sc = scFree;
+    if(S.prevLag > 0){                          // 直前のテンポ仮説からの遷移重み（弱め）
+      const zc = (p - S.prevLag)/(0.07*S.prevLag);
+      sc *= 0.72 + 0.28*Math.exp(-0.5*zc*zc);
     }
     comb[p] = sc;
     sum += sc; cnt++;
@@ -1081,17 +1094,31 @@ function estimate(){
     for(let L=Math.max(2,c-win); L<=Math.min(lagTop,c+win); L++) if(r[L] > m) m = r[L];
     return m;
   };
-  for(let it=0; it<2; it++){
-    const half = Math.round(bestL/2);
-    if(half < lagMin) break;
-    const e1 = pk(bestL), e2 = pk(2*bestL);
-    const o1 = pk(half),  o2 = pk(1.5*bestL);
-    if(e1 <= 0 || o1 <= 0) break;
-    const even = e2 > 0 ? (e1+e2)/2 : e1;
-    const odd  = o2 > 0 ? (o1+o2)/2 : o1;
-    if(odd <= even*0.95) break;        // 裏が弱い＝この段が拍
-    bestL = half;                      // 裏も同じ強さ＝1つ下の段が拍
-  }
+  const fixLevel = L0 => {
+    let L = L0;
+    for(let it=0; it<2; it++){
+      const half = Math.round(L/2);
+      if(half < lagMin) break;
+      const e1 = pk(L), e2 = pk(2*L);
+      const o1 = pk(half), o2 = pk(1.5*L);
+      if(e1 <= 0 || o1 <= 0) break;
+      const even = e2 > 0 ? (e1+e2)/2 : e1;
+      const odd  = o2 > 0 ? (o1+o2)/2 : o1;
+      // 実測(50/60/140/170 BPM): 拍の段は −0.11〜0.29、小節の段は 0.94〜1.16。
+      // 0.6 はその中間で、どちらにも2倍近い余裕がある。
+      if(odd <= even*0.6) break;       // 裏が弱い＝この段が拍
+      L = half;                        // 裏も同じ強さ＝1つ下の段が拍
+    }
+    return L;
+  };
+  bestL = fixLevel(bestL);
+  freeL = freeL > 0 ? fixLevel(freeL) : bestL;
+
+  // C) 連続性なしの答えと食い違う状態が約1.4秒続いたら、そちらへ乗り換える。
+  //    誤った段に固着したままにしないための保険。
+  if(freeL !== bestL){
+    if(++S.disagree > 9){ bestL = freeL; S.raws.length = 0; S.disagree = 0; }
+  }else S.disagree = 0;
 
   // 5) 周期を精密化。lag分解能そのものが粗い（速いテンポほど1ラグが効く）ので、
   //    使える範囲でいちばん高次のピーク（最大4周期ぶん）を補間して a で割る
