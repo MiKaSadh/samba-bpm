@@ -246,7 +246,7 @@ canvas#scope{display:block; width:100%; height:52px; background:var(--soft); bor
 
   <div class="bar">
     <span class="side"><span class="lamp" id="lamp"></span></span>
-    <h1>BATERIA BPM</h1>
+    <h1>BPM</h1>
     <span class="side r">
       <span class="pill" id="pillRange">50–175</span>
       <button class="iconBtn" id="btnMore" type="button">詳細・設定</button>
@@ -455,7 +455,7 @@ canvas#scope{display:block; width:100%; height:52px; background:var(--soft); bor
           <div class="row">
             <span class="k">動作確認</span>
             <div class="c">
-              <input type="number" id="testBpm" min="60" max="200" step="1" value="132" inputmode="numeric">
+              <input type="number" id="testBpm" min="40" max="220" step="1" value="132" inputmode="numeric">
               <button class="btn aqua" id="btnTest" type="button">自己テスト</button>
               <span class="hint">マイクを使わず、内蔵のサンバ風パターン（スルド＋カイシャ16分＋タンボリン）を鳴らして検出を確認します。練習前のチェック用。</span>
             </div>
@@ -589,7 +589,7 @@ function layout(){
       // 数字は横幅いっぱいまで。「102.34」は整数3桁＋小数2桁で約2.3文字幅ぶん
       el.gaugeBox.style.width = ""; el.gaugeBox.style.height = "";
       const avail = body.clientHeight - 26 - btn - st - 40;
-      const F = Math.max(26, Math.min((body.clientWidth - 26)/2.40, avail/1.15));
+      const F = Math.max(26, Math.min((body.clientWidth - 26)/2.10, avail/1.15));
       el.bpmInt.style.fontSize = F + "px";
       el.bpmDec.style.fontSize = (F*0.36) + "px";
       if(u) u.style.fontSize = Math.max(9, F*0.105) + "px";
@@ -610,6 +610,8 @@ function layout(){
 function setDisplay(d, silent){
   S.display = (d === "big") ? "big" : "std";
   el.app.classList.toggle("big", S.display === "big");
+  el.bpmInt.dataset.v = ""; el.bpmDec.dataset.v = "";   // 小数桁数が変わるので作り直す
+  updateReadout();
   syncSeg(el.segDisplay, b => b.dataset.d === S.display);
   layout();
   if(!silent) saveCfg();
@@ -624,8 +626,15 @@ function showView(v){
 
 /* ---------- 大きな数字（桁幅を固定してガタつきを防ぐ） ---------- */
 function setDigits(node, str){
-  if(node.dataset.v === str) return;
+  const prev = node.dataset.v;
+  if(prev === str) return;
   node.dataset.v = str;
+  // 桁数が同じなら中身だけ書き換える（毎回作り直すと大きな文字で再配置が重い）
+  if(prev && prev.length === str.length){
+    const sp = node.children;
+    for(let i=0;i<str.length;i++) if(sp[i].textContent !== str[i]) sp[i].textContent = str[i];
+    return;
+  }
   node.textContent = "";
   for(const ch of str){
     const s = document.createElement("span");
@@ -1029,10 +1038,13 @@ function estimate(){
   // テンポ事前分布。レイリー分布はラグに比例するぶん遅いテンポへ偏るので、
   // オクターブ対称な対数正規分布を使う。範囲が2倍以上あるときだけ強めに効かせ、
   // 倍・半分のどちらを採るかを決める係にする。
-  const wide = S.bpmMax >= S.bpmMin*2;
-  const centre = S.target || (wide ? 130 : Math.sqrt(S.bpmMin*S.bpmMax));
-  const sig = S.target ? 0.30 : (wide ? 0.75 : 1.2);
+  // 事前分布は弱くしておく。強く効かせると、16分を刻む編成では
+  // 「速すぎる段」を拾ってしまう（60で叩いて120と出る原因だった）。
+  // 遅すぎる段は下の拍段の検証で落とすので、ここは広めでよい。
+  const centre = S.target || Math.sqrt(S.bpmMin*S.bpmMax);
+  const sig = S.target ? 0.30 : 1.1;
   let best = -Infinity, bestL = -1, sum = 0, cnt = 0;
+  const comb = S.combDbg && S.combDbg.length > lagMax ? S.combDbg : (S.combDbg = new Float32Array(RING));
   for(let p=lagMin; p<=lagMax; p++){
     let s = 0, used = 0;
     for(let a=1;a<=4;a++){
@@ -1050,12 +1062,38 @@ function estimate(){
       const z = (p - S.prevLag)/(0.07*S.prevLag);
       sc *= 0.45 + 0.55*Math.exp(-0.5*z*z);
     }
+    comb[p] = sc;
     sum += sc; cnt++;
     if(sc > best){ best = sc; bestL = p; }
   }
+  const combRaw = bestL;
   if(bestL < 0) return null;
 
-  // 4) 周期を精密化。lag分解能そのものが粗い（速いテンポほど1ラグが効く）ので、
+  // 4) 拍の段（メトリカルレベル）を生の自己相関で検証する。
+  //    櫛形フィルタは p と 2p をほぼ同じ高さに評価するので区別できない。
+  //    ・p が本当の拍なら、裏の位置（p/2・3p/2）のピークは p・2p より弱い
+  //    ・p が本当の拍の2倍なら、裏の位置も本物の拍なので同じ強さになる
+  const pk = lag => {
+    const c = Math.round(lag);
+    if(c < 2 || c > lagTop) return -1;
+    const win = Math.max(1, Math.round(c*0.02));
+    let m = -1;
+    for(let L=Math.max(2,c-win); L<=Math.min(lagTop,c+win); L++) if(r[L] > m) m = r[L];
+    return m;
+  };
+  for(let it=0; it<2; it++){
+    const half = Math.round(bestL/2);
+    if(half < lagMin) break;
+    const e1 = pk(bestL), e2 = pk(2*bestL);
+    const o1 = pk(half),  o2 = pk(1.5*bestL);
+    if(e1 <= 0 || o1 <= 0) break;
+    const even = e2 > 0 ? (e1+e2)/2 : e1;
+    const odd  = o2 > 0 ? (o1+o2)/2 : o1;
+    if(odd <= even*0.95) break;        // 裏が弱い＝この段が拍
+    bestL = half;                      // 裏も同じ強さ＝1つ下の段が拍
+  }
+
+  // 5) 周期を精密化。lag分解能そのものが粗い（速いテンポほど1ラグが効く）ので、
   //    使える範囲でいちばん高次のピーク（最大4周期ぶん）を補間して a で割る
   let Lr = bestL;
   for(let a=4; a>=1; a--){
@@ -1080,7 +1118,8 @@ function estimate(){
   const meanS = sum/cnt;
   const prom = (best - meanS)/(Math.abs(best)+1e-9);
   const conf = clamp(0.5*clamp(r[bestL]/0.18, 0, 1) + 0.5*clamp(prom/0.5, 0, 1), 0, 1);
-  S.dbg = {peak:r[bestL], prom, N, lag:bestL};
+  // 生の自己相関は S.acf、櫛形スコアは S.combDbg に残してある（調査用）
+  S.dbg = {peak:r[bestL], prom, N, lag:bestL, combLag:combRaw, lagMin, lagMax, centre, sig, fs};
   S.prevLag = bestL;
 
   return {bpm:60*fs/Lr, conf, period:Lr/fs};
@@ -1418,9 +1457,12 @@ function updateReadout(){
   const hasVal = S.disp > 0 && S.conf > 0.1;
   el.gaugeBox.classList.toggle("idle", !hasVal);
   if(hasVal){
-    const t = Math.round(S.disp*100);
-    setDigits(el.bpmInt, String(Math.floor(t/100)).padStart(3, "0"));
-    setDigits(el.bpmDec, "." + String(t % 100).padStart(2, "0"));
+    // 大表示は離れて読むので小数1桁。実際の精度(±0.3程度)にも見合う
+    const dp = S.display === "big" ? 1 : 2;
+    const sc = dp === 1 ? 10 : 100;
+    const t = Math.round(S.disp*sc);
+    setDigits(el.bpmInt, String(Math.floor(t/sc)).padStart(3, "0"));
+    setDigits(el.bpmDec, "." + String(t % sc).padStart(dp, "0"));
     let msg;
     if(S.hold) msg = "ホールド中";
     else if(S.conf > 0.55) msg = "安定 · ±" + fmt1(S.jitter);
@@ -1429,7 +1471,7 @@ function updateReadout(){
     el.stateMsg.textContent = msg + (S.mode === "test" ? "（自己テスト）" : "");
   }else{
     setDigits(el.bpmInt, "---");
-    setDigits(el.bpmDec, ".--");
+    setDigits(el.bpmDec, S.display === "big" ? ".-" : ".--");
     el.stateMsg.textContent = !S.running ? "マイクを許可して開始"
       : (S.peak < 0.004 ? "音が小さすぎます（感度を上げてください）" : "テンポを探しています…");
   }
@@ -1608,7 +1650,7 @@ async function start(mode){
       S.mode = "mic";
     }else{
       S.test.on = true;
-      S.test.bpm = clamp(Number(el.testBpm.value)||132, 60, 200);
+      S.test.bpm = clamp(Number(el.testBpm.value)||132, 40, 220);
       S.test.next = S.ctx.currentTime + 0.12;
       S.test.step = 0;
       startRoomNoise();
@@ -1753,7 +1795,7 @@ el.optWake.addEventListener("change", () => {
   saveCfg();
 });
 el.testBpm.addEventListener("change", () => {
-  S.test.bpm = clamp(Number(el.testBpm.value)||132, 60, 200);
+  S.test.bpm = clamp(Number(el.testBpm.value)||132, 40, 220);
   el.testBpm.value = S.test.bpm;
   saveCfg();
 });
